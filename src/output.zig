@@ -10,6 +10,7 @@ pub const ScanRecord = struct {
     version: ?[]const u8 = null,
     extra: ?[]const u8 = null,
     tls: bool = false,
+    scripts: ?[]const u8 = null,
     rtt_us: u64,
     timestamp: i64,
 };
@@ -107,6 +108,11 @@ pub const JsonWriter = struct {
         if (rec.tls) {
             w.writeAll(",\"tls\":true") catch return;
         }
+        if (rec.scripts) |scr| {
+            w.writeAll(",\"scripts\":\"") catch return;
+            writeJsonEscaped(w, scr);
+            w.writeByte('"') catch return;
+        }
 
         w.print(",\"rtt_us\":{d},\"timestamp\":{d}}}", .{ rec.rtt_us, rec.timestamp }) catch return;
     }
@@ -195,7 +201,7 @@ pub const XmlWriter = struct {
         };
         const w = xw.bw.writer();
         w.writeAll("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n") catch {};
-        w.writeAll("<ohmzscan scanner=\"ohmz\" version=\"0.3.0\">\n") catch {};
+        w.writeAll("<ohmzscan scanner=\"ohmz\" version=\"0.4.0\">\n") catch {};
         return xw;
     }
 
@@ -285,6 +291,25 @@ pub const NdjsonWriter = struct {
         self.file.close();
     }
 };
+
+fn writeJsonEscaped(w: anytype, s: []const u8) void {
+    for (s) |c| {
+        switch (c) {
+            '"' => w.writeAll("\\\"") catch return,
+            '\\' => w.writeAll("\\\\") catch return,
+            '\n' => w.writeAll("\\n") catch return,
+            '\r' => w.writeAll("\\r") catch return,
+            '\t' => w.writeAll("\\t") catch return,
+            else => {
+                if (c < 0x20) {
+                    w.print("\\u{x:0>4}", .{c}) catch return;
+                } else {
+                    w.writeByte(c) catch return;
+                }
+            },
+        }
+    }
+}
 
 pub fn printResult(writer: anytype, rec: ScanRecord) void {
     var ip_buf: [16]u8 = undefined;

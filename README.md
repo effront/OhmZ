@@ -100,6 +100,36 @@
 </details>
 
 <details>
+<summary><kbd>Detection Features (click to expand)</kbd></summary>
+
+```
++---------------------------------------------------------------------------+
+|  SCRIPT SCANNING (-sC)                                                    |
+|  [x] http-title       -- extract page title from HTTP response            |
+|  [x] http-robots      -- parse robots.txt disallow entries                |
+|  [x] ssh-hostkey      -- SSH version string and host key                  |
+|  [x] smtp-commands    -- EHLO extension enumeration                       |
+|  [x] mysql-info       -- version, auth plugin, capabilities               |
+|                                                                           |
+|  OS FINGERPRINTING (-O)                                                   |
+|  [x] TCP SYN probe    -- sends SYN, analyzes SYN-ACK response             |
+|  [x] TTL analysis     -- base TTL detection (64/128/255)                  |
+|  [x] Window size      -- range matching per OS version                    |
+|  [x] TCP options      -- MSS, WScale, SACK, Timestamps                    |
+|  [x] Signature DB     -- Linux, Windows, macOS, FreeBSD, OpenBSD,         |
+|                          Cisco IOS, Solaris                               |
+|                                                                           |
+|  TRACEROUTE (--traceroute)                                                |
+|  [x] UDP probes       -- incrementing TTL (1-30)                          |
+|  [x] ICMP listener    -- Time Exceeded / Destination Unreachable          |
+|  [x] Auto-stop        -- after 5 consecutive timeouts                     |
+|  [x] Concurrent       -- multi-threaded for multiple targets              |
++---------------------------------------------------------------------------+
+```
+
+</details>
+
+<details>
 <summary><kbd>Evasion Techniques (click to expand)</kbd></summary>
 
 ```
@@ -153,7 +183,7 @@ brew tap effront/tap && brew install ohmz
 docker run --cap-add=NET_RAW ghcr.io/effront/ohmz -sS 192.168.1.0/24
 
 # Or download the .deb
-sudo dpkg -i ohmz_0.2.0_amd64.deb
+sudo dpkg -i ohmz_0.4.0_amd64.deb
 ```
 
 ### Prerequisites
@@ -307,7 +337,7 @@ zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSafe
 |  Sync: std.atomic.Value (lock-free, monotonic ordering)                   |
 |  Zero mutexes on hot path. UI reads stale-by-250ms, which is fine.        |
 +---------------------------------------------------------------------------+
-|  Connect mode: single-threaded, non-blocking poll() per connection.       |
+|  Connect mode: batch 512 concurrent sockets, poll() loop with deadline.   |
 |  No raw sockets needed - uses kernel TCP connect().                       |
 +---------------------------------------------------------------------------+
 ```
@@ -322,8 +352,11 @@ OhmZ/
     packet.zig            TcpTemplate: IP+TCP header construction, checksums
     tx.zig                TX engine: raw socket packet transmission
     rx.zig                RX engine: response capture, per-scan-type logic
-    connect.zig           ConnectEngine: kernel TCP connect() for -sT
+    connect.zig           ConnectEngine: batch concurrent connect() for -sT
     cookie.zig            SipHash-2-4 SYN cookie generation/validation
+    os.zig                OS fingerprinting: TCP stack analysis (TTL, window, options)
+    scripts.zig           Default script engine (http-title, ssh-hostkey, etc.)
+    traceroute.zig        UDP traceroute with ICMP listener
     blackrock.zig         BlackRock cipher: O(1) target space permutation
     throttle.zig          Rate limiter: 256-bucket sliding window
     stats.zig             ScanStats: atomic counters + snapshot
@@ -409,9 +442,12 @@ PORTS:
   -F                      Fast scan (top 100 ports)
   --top-ports <n>         Most common N ports
 
-SERVICES:
+DETECTION:
   -sV                     Banner grabbing / version detection
-  -A                      Aggressive (enables -sV, -sC, -O)
+  -sC                     Default script scanning
+  -O                      OS fingerprinting (requires root)
+  --traceroute            Trace hop path to each target (requires root)
+  -A                      Aggressive (-sV -sC -O --traceroute)
 
 OUTPUT:
   -oN / -oJ               Normal text / JSON
@@ -452,8 +488,8 @@ ohmz -sT -p 80,443,8080 target.com
 # Fast scan - top 100 ports
 sudo ohmz -F 10.10.10.1
 
-# Aggressive scan with banner grabbing
-sudo ohmz -sS -sV -T4 -p 1-10000 -oA scan_results target.com
+# Aggressive scan (banner + scripts + OS + traceroute)
+sudo ohmz -A -sT -p 1-65535 target.com
 
 # Stealth scan with evasion
 sudo ohmz -sF --scan-delay 500 --decoys 10.0.0.5,10.0.0.9 -T1 target.com
@@ -576,13 +612,18 @@ zig build -Dtarget=arm-linux-gnueabihf # ARM 32-bit (Tier 3)
 |       |  top ports, timing templates, excludes,  |          |
 |       |  proportional drain, ConnectEngine       |          |
 +-------+------------------------------------------+----------+
-|   3   |  Intelligence: banner grabbing (-sV),    |  DEV     |
-|       |  protocol parsers (10+), TLS cert        |          |
-|       |  extraction, IPv6, sharding              |          |
+|   3   |  Intelligence: banner grabbing (-sV),    |  DONE    |
+|       |  protocol parsers (10+), TLS cert        |  v0.3.0  |
+|       |  extraction                              |          |
 +-------+------------------------------------------+----------+
-|   4   |  Advanced: OS fingerprinting, evasion    |  PLAN    |
-|       |  techniques, SCTP, io_uring backend,     |          |
-|       |  multi-NIC, plugin system(comptime+WASM) |          |
+|   4   |  Detection: OS fingerprinting (-O),      |  DONE    |
+|       |  script scanning (-sC), traceroute,      |  v0.4.0  |
+|       |  aggressive mode (-A), batch connect     |          |
+|       |  engine (512 concurrent, poll loop)      |          |
++-------+------------------------------------------+----------+
+|   5   |  Advanced: IPv6, SCTP, io_uring backend, |  PLAN    |
+|       |  evasion techniques, multi-NIC, sharding,|          |
+|       |  plugin system (comptime + WASM)         |          |
 +=======+==========================================+==========+
 ```
 

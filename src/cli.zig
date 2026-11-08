@@ -66,6 +66,7 @@ pub const ScanConfig = struct {
     banner_grab: bool = false,
     script_scan: bool = false,
     os_detect: bool = false,
+    traceroute: bool = false,
     skip_discovery: bool = false,
     shard_id: ?u16 = null,
     shard_total: ?u16 = null,
@@ -142,10 +143,13 @@ pub fn parse(allocator: std.mem.Allocator) (ParseError || std.mem.Allocator.Erro
             config.script_scan = true;
         } else if (std.mem.eql(u8, arg, "-O")) {
             config.os_detect = true;
+        } else if (std.mem.eql(u8, arg, "--traceroute")) {
+            config.traceroute = true;
         } else if (std.mem.eql(u8, arg, "-A")) {
             config.banner_grab = true;
             config.script_scan = true;
             config.os_detect = true;
+            config.traceroute = true;
         } else if (std.mem.eql(u8, arg, "-Pn")) {
             config.skip_discovery = true;
         } else if (std.mem.eql(u8, arg, "-F")) {
@@ -270,8 +274,14 @@ pub fn printUsage(writer: anytype) void {
         \\  --rate <pps>    Packets per second
         \\  -T0 to -T5     Timing template
         \\
+        \\DETECTION:
+        \\  -sV             Service/version detection
+        \\  -sC             Default script scanning
+        \\  -O              OS fingerprinting
+        \\  --traceroute    Trace hop path to target
+        \\  -A              Aggressive (-sV -sC -O --traceroute)
+        \\
         \\OPTIONS:
-        \\  -sV             Banner grabbing
         \\  -Pn             Skip host discovery
         \\  -iL <file>      Target list file
         \\  --exclude <t>   Exclude target
