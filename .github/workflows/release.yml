@@ -24,20 +24,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Cache Zig
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4
-        with:
-          path: ~/zig
-          key: zig-0.14.1-x86_64
-
       - name: Setup Zig
-        run: |
-          if [ ! -f ~/zig/zig ]; then
-            mkdir -p ~/zig
-            curl -sL https://ziglang.org/download/0.14.1/zig-linux-x86_64-0.14.1.tar.xz \
-              | tar -xJ --strip-components=1 -C ~/zig
-          fi
-          echo "$HOME/zig" >> "$GITHUB_PATH"
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
 
       - name: Run tests
         if: matrix.arch == 'x86_64'
