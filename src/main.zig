@@ -128,12 +128,15 @@ pub fn main() !void {
         };
         defer tx_engine.deinit();
 
+        const drain_secs = computeDrain(target_space.total_targets, rate);
+
         rx_engine = rx_mod.RxEngine.init(
             allocator,
             &syn_cookie,
             &scan_stats,
             src_port,
             config.scan_type,
+            drain_secs,
         ) catch |err| {
             try stderr.print("error: could not open capture socket - {any}\n", .{err});
             scan_stats.markDone();
@@ -145,7 +148,7 @@ pub fn main() !void {
         const rx_handle = try std.Thread.spawn(.{}, rxThreadFn, .{&rx_engine.?});
 
         tx_handle.join();
-        std.time.sleep(2 * std.time.ns_per_s);
+        std.time.sleep(drain_secs * std.time.ns_per_s);
         scan_stats.markDone();
 
         rx_handle.join();
@@ -265,6 +268,13 @@ pub fn main() !void {
         avg_pps,
         snap.open,
     });
+}
+
+fn computeDrain(total_targets: u64, rate: u64) u64 {
+    if (rate == 0) return 3;
+    const tx_time = total_targets / rate;
+    const drain = tx_time / 2 + 3;
+    return @min(10, @max(3, drain));
 }
 
 fn writeOutputFiles(config: *const cli.ScanConfig, open_ports: []rx_mod.OpenPort, banners: ?[]banner_mod.BannerInfo) void {

@@ -25,6 +25,7 @@ pub const RxEngine = struct {
     results: ResultStore,
     src_port: u16,
     scan_type: cli.ScanType,
+    drain_ns: u64,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -32,6 +33,7 @@ pub const RxEngine = struct {
         stats: *stats_mod.ScanStats,
         src_port: u16,
         scan_type: cli.ScanType,
+        drain_secs: u64,
     ) !RxEngine {
         const fd = try openCaptureSocket();
         return .{
@@ -41,6 +43,7 @@ pub const RxEngine = struct {
             .results = ResultStore.init(allocator),
             .src_port = src_port,
             .scan_type = scan_type,
+            .drain_ns = drain_secs * std.time.ns_per_s,
         };
     }
 
@@ -153,7 +156,7 @@ pub const RxEngine = struct {
     }
 
     fn drainRemaining(self: *RxEngine, buf: *[1540]u8) void {
-        const deadline = std.time.nanoTimestamp() + 2 * std.time.ns_per_s;
+        const deadline = std.time.nanoTimestamp() + @as(i128, self.drain_ns);
         while (std.time.nanoTimestamp() < deadline) {
             const n = std.posix.recvfrom(
                 self.sock_fd,
