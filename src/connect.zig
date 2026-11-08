@@ -5,7 +5,8 @@ const throttle_mod = @import("throttle.zig");
 const stats_mod = @import("stats.zig");
 const rx_mod = @import("rx.zig");
 
-const CONNECT_TIMEOUT_MS: u32 = 3000;
+const CONNECT_TIMEOUT_MS: i64 = 3000;
+const BATCH_SIZE: usize = 512;
 
 pub const ConnectEngine = struct {
     target_space: *const target_mod.TargetSpace,
@@ -46,15 +47,17 @@ pub const ConnectEngine = struct {
     pub fn run(self: *ConnectEngine) void {
         var index: u64 = self.start_index;
 
+        var fds: [BATCH_SIZE]std.posix.fd_t = undefined;
+        var ips: [BATCH_SIZE]u32 = undefined;
+        var ports: [BATCH_SIZE]u16 = undefined;
+        var pending: [BATCH_SIZE]bool = undefined;
+
         while (index < self.target_space.total_targets) {
             if (self.stats.isDone()) break;
 
-            const batch = self.throttle.nextBatch();
-            var sent_this_batch: u64 = 0;
+            var batch_count: usize = 0;
 
-            for (0..batch.count) |_| {
-                if (index >= self.target_space.total_targets) break;
-
+            while (batch_count < BATCH_SIZE and index < self.target_space.total_targets) {
                 if (self.shard_total) |total| {
                     if ((index % @as(u64, total)) != @as(u64, (self.shard_id orelse 1) - 1)) {
                         index += 1;
@@ -64,67 +67,107 @@ pub const ConnectEngine = struct {
 
                 const shuffled = self.shuffler.shuffle(index);
                 const t = self.target_space.targetAt(shuffled);
-
-                self.tryConnect(t.ip, t.port);
-                sent_this_batch += 1;
                 index += 1;
+
+                const fd = std.posix.socket(
+                    std.posix.AF.INET,
+                    std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
+                    0,
+                ) catch continue;
+
+                var dest = std.posix.sockaddr.in{
+                    .family = std.posix.AF.INET,
+                    .port = std.mem.nativeToBig(u16, t.port),
+                    .addr = std.mem.nativeToBig(u32, t.ip),
+                };
+
+                const connected_immediately = blk: {
+                    std.posix.connect(fd, @ptrCast(&dest), @sizeOf(std.posix.sockaddr.in)) catch |err| {
+                        if (err == error.WouldBlock) break :blk false;
+                        std.posix.close(fd);
+                        self.stats.addSent(1);
+                        self.stats.addRecv(1);
+                        self.stats.addClosed();
+                        break :blk true;
+                    };
+                    break :blk true;
+                };
+
+                if (connected_immediately) {
+                    if (std.posix.getsockoptError(fd)) |_| {} else |_| {
+                        continue;
+                    }
+                    self.markOpen(t.ip, t.port);
+                    std.posix.close(fd);
+                    continue;
+                }
+
+                fds[batch_count] = fd;
+                ips[batch_count] = t.ip;
+                ports[batch_count] = t.port;
+                pending[batch_count] = true;
+                batch_count += 1;
             }
 
-            if (sent_this_batch > 0) {
-                self.stats.addSent(sent_this_batch);
+            if (batch_count == 0) continue;
+
+            self.stats.addSent(batch_count);
+
+            var pfds: [BATCH_SIZE]std.posix.pollfd = undefined;
+            for (0..batch_count) |i| {
+                pfds[i] = .{
+                    .fd = fds[i],
+                    .events = std.posix.POLL.OUT,
+                    .revents = 0,
+                };
             }
 
-            if (batch.sleep_ns > 0) {
-                std.time.sleep(batch.sleep_ns);
+            var remaining = batch_count;
+            const deadline = std.time.milliTimestamp() + CONNECT_TIMEOUT_MS;
+
+            while (remaining > 0) {
+                const now = std.time.milliTimestamp();
+                const left = deadline - now;
+                if (left <= 0) break;
+
+                const timeout: i32 = @intCast(@min(left, std.math.maxInt(i32)));
+                const ready = std.posix.poll(pfds[0..batch_count], timeout) catch break;
+                if (ready == 0) break;
+
+                for (0..batch_count) |i| {
+                    if (!pending[i]) continue;
+                    if (pfds[i].revents == 0) continue;
+
+                    pending[i] = false;
+                    remaining -= 1;
+                    pfds[i].fd = -1;
+
+                    if (pfds[i].revents & std.posix.POLL.OUT != 0) {
+                        std.posix.getsockoptError(fds[i]) catch {
+                            self.stats.addRecv(1);
+                            self.stats.addClosed();
+                            std.posix.close(fds[i]);
+                            continue;
+                        };
+                        self.markOpen(ips[i], ports[i]);
+                    } else {
+                        self.stats.addRecv(1);
+                        self.stats.addClosed();
+                    }
+                    std.posix.close(fds[i]);
+                }
+            }
+
+            for (0..batch_count) |i| {
+                if (pending[i]) {
+                    self.stats.addRecv(1);
+                    self.stats.addClosed();
+                    std.posix.close(fds[i]);
+                }
             }
         }
 
         self.stats.markDone();
-    }
-
-    fn tryConnect(self: *ConnectEngine, ip: u32, port: u16) void {
-        const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK, 0) catch return;
-        defer std.posix.close(fd);
-
-        var dest = std.posix.sockaddr.in{
-            .family = std.posix.AF.INET,
-            .port = std.mem.nativeToBig(u16, port),
-            .addr = std.mem.nativeToBig(u32, ip),
-        };
-
-        const need_poll: bool = blk: {
-            std.posix.connect(fd, @ptrCast(&dest), @sizeOf(std.posix.sockaddr.in)) catch |err| {
-                if (err == error.WouldBlock) break :blk true;
-                self.stats.addRecv(1);
-                self.stats.addClosed();
-                return;
-            };
-            self.markOpen(ip, port);
-            return;
-        };
-        _ = need_poll;
-
-        var pfd = [1]std.posix.pollfd{.{
-            .fd = fd,
-            .events = std.posix.POLL.OUT,
-            .revents = 0,
-        }};
-
-        const ready = std.posix.poll(&pfd, CONNECT_TIMEOUT_MS) catch return;
-
-        if (ready == 0) return;
-
-        if (pfd[0].revents & std.posix.POLL.OUT != 0) {
-            std.posix.getsockoptError(fd) catch {
-                self.stats.addRecv(1);
-                self.stats.addClosed();
-                return;
-            };
-            self.markOpen(ip, port);
-        } else {
-            self.stats.addRecv(1);
-            self.stats.addClosed();
-        }
     }
 
     fn markOpen(self: *ConnectEngine, ip: u32, port: u16) void {

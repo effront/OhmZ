@@ -10,6 +10,7 @@ pub const ScanRecord = struct {
     version: ?[]const u8 = null,
     extra: ?[]const u8 = null,
     tls: bool = false,
+    scripts: ?[]const u8 = null,
     rtt_us: u64,
     timestamp: i64,
 };
@@ -107,6 +108,9 @@ pub const JsonWriter = struct {
         if (rec.tls) {
             w.writeAll(",\"tls\":true") catch return;
         }
+        if (rec.scripts) |scr| {
+            w.print(",\"scripts\":\"{s}\"", .{scr}) catch return;
+        }
 
         w.print(",\"rtt_us\":{d},\"timestamp\":{d}}}", .{ rec.rtt_us, rec.timestamp }) catch return;
     }
@@ -195,7 +199,7 @@ pub const XmlWriter = struct {
         };
         const w = xw.bw.writer();
         w.writeAll("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n") catch {};
-        w.writeAll("<ohmzscan scanner=\"ohmz\" version=\"0.3.0\">\n") catch {};
+        w.writeAll("<ohmzscan scanner=\"ohmz\" version=\"0.4.0\">\n") catch {};
         return xw;
     }
 
