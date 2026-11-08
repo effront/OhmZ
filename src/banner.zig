@@ -233,9 +233,7 @@ fn probeSsh(ip: u32, port: u16) ServiceInfo {
     if (std.mem.indexOf(u8, software, "OpenSSH")) |_| {
         info.setName("OpenSSH");
         if (std.mem.indexOf(u8, software, "_")) |uscore| {
-            const ver_start = uscore + 1;
-            const ver_end = std.mem.indexOfAnyPos(u8, software, ver_start, " \t") orelse software.len;
-            info.setVersion(software[ver_start..ver_end]);
+            info.setVersion(software[uscore + 1 ..]);
         }
     } else if (std.mem.indexOf(u8, software, "dropbear")) |_| {
         info.setName("Dropbear");
@@ -547,24 +545,53 @@ fn probeGeneric(ip: u32, port: u16) ServiceInfo {
     defer std.posix.close(fd);
 
     var buf: [1024]u8 = undefined;
-    const n = std.posix.read(fd, &buf) catch return info;
-    if (n == 0) return info;
+    const n = readWithTimeout(fd, &buf, 500_000_000);
+    if (n > 0) {
+        const line_end = std.mem.indexOfAny(u8, buf[0..n], "\r\n") orelse @min(n, 128);
+        const line = buf[0..line_end];
 
-    const line_end = std.mem.indexOfAny(u8, buf[0..n], "\r\n") orelse @min(n, 128);
-    const line = buf[0..line_end];
+        if (std.mem.startsWith(u8, line, "SSH-")) {
+            return probeSshFromBanner(line);
+        }
 
-    if (std.mem.startsWith(u8, line, "SSH-")) {
-        return probeSshFromBanner(line);
+        if (line.len > 4 and isDigit(line[0]) and isDigit(line[1]) and isDigit(line[2]) and (line[3] == ' ' or line[3] == '-')) {
+            info.setVersion(line[4..]);
+            return info;
+        }
+
+        if (line.len > 0) {
+            const trimmed = std.mem.trim(u8, line, " \t\r\n");
+            if (trimmed.len > 0) {
+                info.setVersion(trimmed);
+                return info;
+            }
+        }
     }
 
-    if (line.len > 4 and isDigit(line[0]) and isDigit(line[1]) and isDigit(line[2]) and (line[3] == ' ' or line[3] == '-')) {
-        info.setVersion(line[4..]);
-        return info;
-    }
+    var ip_buf: [16]u8 = undefined;
+    const ip_str = formatIp(&ip_buf, ip);
+    var req_buf: [128]u8 = undefined;
+    const request = std.fmt.bufPrint(&req_buf, "GET / HTTP/1.0\r\nHost: {s}\r\n\r\n", .{ip_str}) catch return info;
+    _ = std.posix.write(fd, request) catch return info;
 
-    if (line.len > 0) {
-        const trimmed = std.mem.trim(u8, line, " \t\r\n");
-        if (trimmed.len > 0) info.setVersion(trimmed);
+    const hn = std.posix.read(fd, &buf) catch return info;
+    if (hn == 0) return info;
+
+    const data = buf[0..hn];
+    if (!std.mem.startsWith(u8, data, "HTTP/")) return info;
+
+    if (std.mem.indexOf(u8, data, "Server: ")) |pos| {
+        const start = pos + 8;
+        const end = std.mem.indexOfPos(u8, data, start, "\r\n") orelse @min(start + 80, hn);
+        const server = data[start..end];
+        if (std.mem.indexOf(u8, server, "/")) |slash| {
+            info.setName(server[0..slash]);
+            if (slash + 1 < server.len) info.setVersion(server[slash + 1 ..]);
+        } else {
+            info.setName(server);
+        }
+    } else {
+        info.setName("HTTP");
     }
 
     return info;
@@ -588,8 +615,7 @@ fn probeSshFromBanner(line: []const u8) ServiceInfo {
         if (std.mem.indexOf(u8, software, "OpenSSH")) |_| {
             info.setName("OpenSSH");
             if (std.mem.indexOf(u8, software, "_")) |uscore| {
-                const ver_end = std.mem.indexOfAnyPos(u8, software, uscore + 1, " \t") orelse software.len;
-                info.setVersion(software[uscore + 1 .. ver_end]);
+                info.setVersion(software[uscore + 1 ..]);
             }
         } else {
             info.setVersion(software);
@@ -603,6 +629,18 @@ fn probeSshFromBanner(line: []const u8) ServiceInfo {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn readWithTimeout(fd: std.posix.fd_t, buf: []u8, timeout_ns: u64) usize {
+    var pfd = [1]std.posix.pollfd{.{
+        .fd = fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const ms: i32 = @intCast(timeout_ns / 1_000_000);
+    const ready = std.posix.poll(&pfd, ms) catch return 0;
+    if (ready == 0) return 0;
+    return std.posix.read(fd, buf) catch 0;
+}
 
 fn openSocket(ip: u32, port: u16) ?std.posix.fd_t {
     const fd = std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0) catch return null;
