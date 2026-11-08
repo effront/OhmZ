@@ -1,0 +1,22 @@
+# Build
+zig-out/
+.zig-cache/
+zig-cache/
+
+# Scan output
+results.json
+*.json
+*.xml
+*.grep
+*.ndjson
+*.bin
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Environment
+.env*
+!.env.example
