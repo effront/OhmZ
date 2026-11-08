@@ -3,6 +3,7 @@ const packet = @import("packet.zig");
 const cookie_mod = @import("cookie.zig");
 const stats_mod = @import("stats.zig");
 const target_mod = @import("target.zig");
+const cli = @import("cli.zig");
 
 pub const ScanResult = struct {
     ip: u32,
@@ -23,12 +24,16 @@ pub const RxEngine = struct {
     stats: *stats_mod.ScanStats,
     results: ResultStore,
     src_port: u16,
+    scan_type: cli.ScanType,
+    drain_ns: u64,
 
     pub fn init(
         allocator: std.mem.Allocator,
         cookie: *const cookie_mod.SynCookie,
         stats: *stats_mod.ScanStats,
         src_port: u16,
+        scan_type: cli.ScanType,
+        drain_secs: u64,
     ) !RxEngine {
         const fd = try openCaptureSocket();
         return .{
@@ -37,6 +42,8 @@ pub const RxEngine = struct {
             .stats = stats,
             .results = ResultStore.init(allocator),
             .src_port = src_port,
+            .scan_type = scan_type,
+            .drain_ns = drain_secs * std.time.ns_per_s,
         };
     }
 
@@ -89,24 +96,67 @@ pub const RxEngine = struct {
 
         const flags = packet.parseTcpFlags(tcp.data_off_flags);
 
-        if (packet.isSynAck(flags)) {
-            if (self.cookie.validate(src_ip, src_port, packet.fromNet(u32, ip.dst_ip), self.src_port, ack_num)) {
-                self.stats.addRecv(1);
-
-                const key = resultKey(src_ip, src_port);
-                if (!self.results.seen(key)) {
-                    self.results.mark(key, src_ip, src_port);
-                    self.stats.addOpen();
+        switch (self.scan_type) {
+            .syn => {
+                if (packet.isSynAck(flags)) {
+                    if (self.cookie.validate(src_ip, src_port, packet.fromNet(u32, ip.dst_ip), self.src_port, ack_num)) {
+                        self.stats.addRecv(1);
+                        const key = resultKey(src_ip, src_port);
+                        if (!self.results.seen(key)) {
+                            self.results.mark(key, src_ip, src_port);
+                            self.stats.addOpen();
+                        }
+                    }
+                } else if (packet.isRst(flags)) {
+                    self.stats.addRecv(1);
+                    self.stats.addClosed();
                 }
-            }
-        } else if (packet.isRst(flags)) {
-            self.stats.addRecv(1);
-            self.stats.addClosed();
+            },
+            .fin, .xmas, .null_scan => {
+                if (packet.isRst(flags)) {
+                    self.stats.addRecv(1);
+                    self.stats.addClosed();
+                }
+            },
+            .ack => {
+                if (packet.isRst(flags)) {
+                    self.stats.addRecv(1);
+                    self.stats.addClosed();
+                }
+            },
+            .window => {
+                if (packet.isRst(flags)) {
+                    self.stats.addRecv(1);
+                    const win = packet.fromNet(u16, tcp.window);
+                    if (win > 0) {
+                        const key = resultKey(src_ip, src_port);
+                        if (!self.results.seen(key)) {
+                            self.results.mark(key, src_ip, src_port);
+                            self.stats.addOpen();
+                        }
+                    } else {
+                        self.stats.addClosed();
+                    }
+                }
+            },
+            else => {
+                if (packet.isSynAck(flags)) {
+                    self.stats.addRecv(1);
+                    const key = resultKey(src_ip, src_port);
+                    if (!self.results.seen(key)) {
+                        self.results.mark(key, src_ip, src_port);
+                        self.stats.addOpen();
+                    }
+                } else if (packet.isRst(flags)) {
+                    self.stats.addRecv(1);
+                    self.stats.addClosed();
+                }
+            },
         }
     }
 
     fn drainRemaining(self: *RxEngine, buf: *[1540]u8) void {
-        const deadline = std.time.nanoTimestamp() + 2 * std.time.ns_per_s;
+        const deadline = std.time.nanoTimestamp() + @as(i128, self.drain_ns);
         while (std.time.nanoTimestamp() < deadline) {
             const n = std.posix.recvfrom(
                 self.sock_fd,
@@ -127,27 +177,27 @@ pub const OpenPort = struct {
     port: u16,
 };
 
-const ResultStore = struct {
+pub const ResultStore = struct {
     dedup: std.AutoHashMap(u64, void),
     open_list: std.ArrayList(OpenPort),
 
-    fn init(allocator: std.mem.Allocator) ResultStore {
+    pub fn init(allocator: std.mem.Allocator) ResultStore {
         return .{
             .dedup = std.AutoHashMap(u64, void).init(allocator),
             .open_list = std.ArrayList(OpenPort).init(allocator),
         };
     }
 
-    fn deinit(self: *ResultStore) void {
+    pub fn deinit(self: *ResultStore) void {
         self.dedup.deinit();
         self.open_list.deinit();
     }
 
-    fn seen(self: *ResultStore, key: u64) bool {
+    pub fn seen(self: *ResultStore, key: u64) bool {
         return self.dedup.contains(key);
     }
 
-    fn mark(self: *ResultStore, key: u64, ip: u32, port: u16) void {
+    pub fn mark(self: *ResultStore, key: u64, ip: u32, port: u16) void {
         self.dedup.put(key, {}) catch {};
         self.open_list.append(.{ .ip = ip, .port = port }) catch {};
     }

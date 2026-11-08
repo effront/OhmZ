@@ -6,12 +6,13 @@ const cookie_mod = @import("cookie.zig");
 const blackrock = @import("blackrock.zig");
 const tx_mod = @import("tx.zig");
 const rx_mod = @import("rx.zig");
+const connect_mod = @import("connect.zig");
 const stats_mod = @import("stats.zig");
 const progress_mod = @import("progress.zig");
 const output_mod = @import("output.zig");
 const banner_mod = @import("banner.zig");
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -83,65 +84,85 @@ pub fn main() !void {
     var bar = progress_mod.ProgressBar.init(&scan_stats, config.verbosity > 0 or config.show_stats);
     try bar.start();
 
-    var json_writer: ?output_mod.JsonWriter = null;
-    for (config.outputs.items) |out| {
-        if (out.format == .json) {
-            json_writer = output_mod.JsonWriter.init(out.path) catch null;
-        }
-    }
-    if (config.output_all_prefix) |prefix| {
-        var path_buf: [256]u8 = undefined;
-        const json_path = std.fmt.bufPrint(&path_buf, "{s}.json", .{prefix}) catch "ohmz.json";
-        json_writer = output_mod.JsonWriter.init(json_path) catch null;
-    }
-
     var seed_bytes: u64 = 0;
     std.posix.getrandom(std.mem.asBytes(&seed_bytes)) catch {};
 
-    var tx_engine = tx_mod.TxEngine.init(
-        &syn_cookie,
-        &target_space,
-        &scan_stats,
-        src_ip,
-        src_port,
-        rate,
-        seed_bytes,
-        config.shard_id,
-        config.shard_total,
-        0,
-    ) catch |err| {
-        try stderr.print("error: could not open raw socket - {any}\nHint: run with sudo or set CAP_NET_RAW\n", .{err});
-        scan_stats.markDone();
+    var connect_engine: ?connect_mod.ConnectEngine = null;
+    defer if (connect_engine) |*ce| ce.deinit();
+
+    var rx_engine: ?rx_mod.RxEngine = null;
+    defer if (rx_engine) |*re| re.deinit();
+
+    if (config.scan_type == .connect) {
+        connect_engine = connect_mod.ConnectEngine.init(
+            allocator,
+            &target_space,
+            &scan_stats,
+            rate,
+            seed_bytes,
+            config.shard_id,
+            config.shard_total,
+            0,
+        );
+
+        connect_engine.?.run();
         bar.join();
-        std.process.exit(1);
-    };
-    defer tx_engine.deinit();
+    } else {
+        var tx_engine = tx_mod.TxEngine.init(
+            &syn_cookie,
+            &target_space,
+            &scan_stats,
+            src_ip,
+            src_port,
+            rate,
+            seed_bytes,
+            config.shard_id,
+            config.shard_total,
+            0,
+            config.scan_type,
+        ) catch |err| {
+            try stderr.print("error: could not open raw socket - {any}\nHint: run with sudo or set CAP_NET_RAW\n", .{err});
+            scan_stats.markDone();
+            bar.join();
+            std.process.exit(1);
+        };
+        defer tx_engine.deinit();
 
-    var rx_engine = rx_mod.RxEngine.init(
-        allocator,
-        &syn_cookie,
-        &scan_stats,
-        src_port,
-    ) catch |err| {
-        try stderr.print("error: could not open capture socket - {any}\n", .{err});
+        const drain_secs = computeDrain(target_space.total_targets, rate);
+
+        rx_engine = rx_mod.RxEngine.init(
+            allocator,
+            &syn_cookie,
+            &scan_stats,
+            src_port,
+            config.scan_type,
+            drain_secs,
+        ) catch |err| {
+            try stderr.print("error: could not open capture socket - {any}\n", .{err});
+            scan_stats.markDone();
+            bar.join();
+            std.process.exit(1);
+        };
+
+        const tx_handle = try std.Thread.spawn(.{}, txThreadFn, .{&tx_engine});
+        const rx_handle = try std.Thread.spawn(.{}, rxThreadFn, .{&rx_engine.?});
+
+        tx_handle.join();
+        std.time.sleep(drain_secs * std.time.ns_per_s);
         scan_stats.markDone();
+
+        rx_handle.join();
         bar.join();
-        std.process.exit(1);
-    };
-    defer rx_engine.deinit();
+    }
 
-    const tx_handle = try std.Thread.spawn(.{}, txThreadFn, .{&tx_engine});
-    const rx_handle = try std.Thread.spawn(.{}, rxThreadFn, .{&rx_engine});
-
-    tx_handle.join();
-    std.time.sleep(2 * std.time.ns_per_s);
-    scan_stats.markDone();
-
-    rx_handle.join();
-    bar.join();
+    const open_ports = if (connect_engine) |*ce|
+        ce.results.open_list.items
+    else if (rx_engine) |*re|
+        re.results.open_list.items
+    else
+        @as([]rx_mod.OpenPort, &.{});
 
     const snap = scan_stats.snapshot();
-    const open_ports = rx_engine.results.open_list.items;
 
     std.mem.sort(rx_mod.OpenPort, open_ports, {}, struct {
         fn lessThan(_: void, a: rx_mod.OpenPort, b: rx_mod.OpenPort) bool {
@@ -162,6 +183,7 @@ pub fn main() !void {
         banners = b;
     }
 
+    // Console output
     if (open_ports.len > 0) {
         const multi_host = blk: {
             if (open_ports.len <= 1) break :blk false;
@@ -232,9 +254,8 @@ pub fn main() !void {
         }
     }
 
-    if (json_writer) |*jw| {
-        jw.finish();
-    }
+    // File output writers
+    writeOutputFiles(&config, open_ports, banners);
 
     const avg_pps: f64 = if (snap.elapsed_secs > 0.001)
         @as(f64, @floatFromInt(snap.sent)) / snap.elapsed_secs
@@ -247,6 +268,110 @@ pub fn main() !void {
         avg_pps,
         snap.open,
     });
+}
+
+fn computeDrain(total_targets: u64, rate: u64) u64 {
+    if (rate == 0) return 3;
+    const tx_time = total_targets / rate;
+    const drain = tx_time / 2 + 3;
+    return @min(10, @max(3, drain));
+}
+
+fn writeOutputFiles(config: *const cli.ScanConfig, open_ports: []rx_mod.OpenPort, banners: ?[]banner_mod.BannerInfo) void {
+    const ts = std.time.timestamp();
+
+    for (config.outputs.items) |out| {
+        writeOneOutput(out.format, out.path, open_ports, banners, ts);
+    }
+
+    if (config.output_all_prefix) |prefix| {
+        var n_buf: [260]u8 = undefined;
+        var x_buf: [260]u8 = undefined;
+        var g_buf: [260]u8 = undefined;
+        var j_buf: [260]u8 = undefined;
+
+        const n_path = std.fmt.bufPrint(&n_buf, "{s}.nmap", .{prefix}) catch return;
+        const x_path = std.fmt.bufPrint(&x_buf, "{s}.xml", .{prefix}) catch return;
+        const g_path = std.fmt.bufPrint(&g_buf, "{s}.gnmap", .{prefix}) catch return;
+        const j_path = std.fmt.bufPrint(&j_buf, "{s}.json", .{prefix}) catch return;
+
+        writeOneOutput(.normal, n_path, open_ports, banners, ts);
+        writeOneOutput(.xml, x_path, open_ports, banners, ts);
+        writeOneOutput(.grepable, g_path, open_ports, banners, ts);
+        writeOneOutput(.json, j_path, open_ports, banners, ts);
+    }
+}
+
+fn writeOneOutput(
+    format: cli.OutputFormat,
+    path: []const u8,
+    open_ports: []rx_mod.OpenPort,
+    banners: ?[]banner_mod.BannerInfo,
+    ts: i64,
+) void {
+    switch (format) {
+        .json => {
+            var w = output_mod.JsonWriter.init(path) catch return;
+            for (open_ports, 0..) |r, i| {
+                w.writeRecord(makeRecord(r, banners, i, ts));
+            }
+            w.finish();
+        },
+        .xml => {
+            var w = output_mod.XmlWriter.init(path) catch return;
+            for (open_ports, 0..) |r, i| {
+                w.writeRecord(makeRecord(r, banners, i, ts));
+            }
+            w.finish();
+        },
+        .grepable => {
+            var w = output_mod.GrepWriter.init(path) catch return;
+            for (open_ports, 0..) |r, i| {
+                w.writeRecord(makeRecord(r, banners, i, ts));
+            }
+            w.finish();
+        },
+        .normal => {
+            var w = output_mod.NormalWriter.init(path) catch return;
+            var last_ip: u32 = 0;
+            for (open_ports, 0..) |r, i| {
+                if (r.ip != last_ip) {
+                    w.writeHostHeader(r.ip);
+                    last_ip = r.ip;
+                }
+                w.writeRecord(makeRecord(r, banners, i, ts));
+            }
+            w.finish();
+        },
+        .ndjson, .binary => {
+            var w = output_mod.NdjsonWriter.init(path) catch return;
+            for (open_ports, 0..) |r, i| {
+                w.writeRecord(makeRecord(r, banners, i, ts));
+            }
+            w.finish();
+        },
+    }
+}
+
+fn makeRecord(r: rx_mod.OpenPort, banners: ?[]banner_mod.BannerInfo, i: usize, ts: i64) output_mod.ScanRecord {
+    return .{
+        .ip = r.ip,
+        .port = r.port,
+        .protocol = "tcp",
+        .status = "open",
+        .service = svcOrNull(serviceName(r.port)),
+        .version = if (banners) |b| blk: {
+            const v = b[i].str();
+            break :blk if (v.len > 0) v else null;
+        } else null,
+        .rtt_us = 0,
+        .timestamp = ts,
+    };
+}
+
+fn svcOrNull(svc: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, svc, "unknown")) return null;
+    return svc;
 }
 
 fn txThreadFn(engine: *tx_mod.TxEngine) void {

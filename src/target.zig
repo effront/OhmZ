@@ -1,5 +1,6 @@
 const std = @import("std");
 const cli = @import("cli.zig");
+const ports_mod = @import("ports.zig");
 
 pub const Ipv4Addr = [4]u8;
 
@@ -86,6 +87,11 @@ pub fn buildTargetSpace(allocator: std.mem.Allocator, config: *const cli.ScanCon
 
     if (config.ports.items.len > 0) {
         try port_ranges.appendSlice(config.ports.items);
+    } else if (config.top_ports) |n| {
+        const tp = ports_mod.getTopPorts(n);
+        for (tp) |p| {
+            try port_ranges.append(.{ .start = p, .end = p });
+        }
     } else {
         try port_ranges.append(.{ .start = 1, .end = 1000 });
     }
