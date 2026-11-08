@@ -112,11 +112,11 @@
 |  [x] mysql-info       -- version, auth plugin, capabilities               |
 |                                                                           |
 |  OS FINGERPRINTING (-O)                                                   |
-|  [x] TCP SYN probe    -- sends SYN, analyzes SYN-ACK response            |
+|  [x] TCP SYN probe    -- sends SYN, analyzes SYN-ACK response             |
 |  [x] TTL analysis     -- base TTL detection (64/128/255)                  |
 |  [x] Window size      -- range matching per OS version                    |
-|  [x] TCP options      -- MSS, WScale, SACK, Timestamps                   |
-|  [x] Signature DB     -- Linux, Windows, macOS, FreeBSD, OpenBSD,        |
+|  [x] TCP options      -- MSS, WScale, SACK, Timestamps                    |
+|  [x] Signature DB     -- Linux, Windows, macOS, FreeBSD, OpenBSD,         |
 |                          Cisco IOS, Solaris                               |
 |                                                                           |
 |  TRACEROUTE (--traceroute)                                                |
@@ -337,7 +337,7 @@ zig build -Dtarget=x86_64-windows -Doptimize=ReleaseSafe
 |  Sync: std.atomic.Value (lock-free, monotonic ordering)                   |
 |  Zero mutexes on hot path. UI reads stale-by-250ms, which is fine.        |
 +---------------------------------------------------------------------------+
-|  Connect mode: batch 512 concurrent sockets, poll() loop with deadline.  |
+|  Connect mode: batch 512 concurrent sockets, poll() loop with deadline.   |
 |  No raw sockets needed - uses kernel TCP connect().                       |
 +---------------------------------------------------------------------------+
 ```
@@ -619,11 +619,11 @@ zig build -Dtarget=arm-linux-gnueabihf # ARM 32-bit (Tier 3)
 |   4   |  Detection: OS fingerprinting (-O),      |  DONE    |
 |       |  script scanning (-sC), traceroute,      |  v0.4.0  |
 |       |  aggressive mode (-A), batch connect     |          |
-|       |  engine (512 concurrent, poll loop)       |          |
+|       |  engine (512 concurrent, poll loop)      |          |
 +-------+------------------------------------------+----------+
 |   5   |  Advanced: IPv6, SCTP, io_uring backend, |  PLAN    |
 |       |  evasion techniques, multi-NIC, sharding,|          |
-|       |  plugin system (comptime + WASM)          |          |
+|       |  plugin system (comptime + WASM)         |          |
 +=======+==========================================+==========+
 ```
 
