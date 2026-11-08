@@ -1,0 +1,16 @@
+pkgbase = ohmz-bin
+	pkgdesc = High-performance network scanner - SYN scan, banner grabbing, BlackRock randomization
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/effront/OhmZ
+	arch = x86_64
+	arch = aarch64
+	license = AGPL-3.0-only
+	provides = ohmz
+	conflicts = ohmz
+	source_x86_64 = https://github.com/effront/OhmZ/releases/download/v0.1.0/ohmz-linux-x86_64.tar.gz
+	sha256sums_x86_64 = 82dcc7891c7642582403e5a04c122bb23458b0184f2d2983a802f8e45dd6abd3
+	source_aarch64 = https://github.com/effront/OhmZ/releases/download/v0.1.0/ohmz-linux-aarch64.tar.gz
+	sha256sums_aarch64 = a3e171df2e9a5267d831ac451520674e0cf1bee2ddd1dc18e0b5050b1c8caf28
+
+pkgname = ohmz-bin

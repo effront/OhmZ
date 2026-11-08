@@ -17,9 +17,11 @@ jobs:
           - arch: x86_64
             target: x86_64-linux
             artifact: ohmz-linux-x86_64
+            deb_arch: amd64
           - arch: aarch64
             target: aarch64-linux
             artifact: ohmz-linux-aarch64
+            deb_arch: arm64
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -43,11 +45,31 @@ jobs:
           cp README.md dist/
           cd dist && tar czf ../${{ matrix.artifact }}.tar.gz .
 
+      - name: Package .deb
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p deb/DEBIAN deb/usr/local/bin
+          cp zig-out/bin/ohmz deb/usr/local/bin/
+          chmod 755 deb/usr/local/bin/ohmz
+          printf 'Package: ohmz\n' > deb/DEBIAN/control
+          printf 'Version: %s\n' "$VERSION" >> deb/DEBIAN/control
+          printf 'Architecture: ${{ matrix.deb_arch }}\n' >> deb/DEBIAN/control
+          printf 'Maintainer: effront <security@effront.gg>\n' >> deb/DEBIAN/control
+          printf 'Description: High-performance network scanner\n' >> deb/DEBIAN/control
+          printf ' SYN scan, banner grabbing, BlackRock randomization.\n' >> deb/DEBIAN/control
+          printf ' Static binary, no dependencies.\n' >> deb/DEBIAN/control
+          printf 'Homepage: https://github.com/effront/OhmZ\n' >> deb/DEBIAN/control
+          printf 'Priority: optional\n' >> deb/DEBIAN/control
+          printf 'Section: net\n' >> deb/DEBIAN/control
+          dpkg-deb --build deb "ohmz_${VERSION}_${{ matrix.deb_arch }}.deb"
+
       - name: Upload artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.tar.gz
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ohmz_*_${{ matrix.deb_arch }}.deb
 
   release:
     name: Create GitHub Release
@@ -65,4 +87,6 @@ jobs:
           generate_release_notes: true
           files: |
             release-assets/ohmz-linux-x86_64/*.tar.gz
+            release-assets/ohmz-linux-x86_64/*.deb
             release-assets/ohmz-linux-aarch64/*.tar.gz
+            release-assets/ohmz-linux-aarch64/*.deb
