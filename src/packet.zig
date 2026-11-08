@@ -46,10 +46,16 @@ pub const TcpFlags = struct {
 
 pub const PACKET_SIZE = @sizeOf(Ipv4Header) + @sizeOf(TcpHeader);
 
-pub const SynTemplate = struct {
+pub const SynTemplate = TcpTemplate;
+
+pub const TcpTemplate = struct {
     buf: [PACKET_SIZE]u8,
 
-    pub fn init(src_ip: u32, src_port: u16) SynTemplate {
+    pub fn init(src_ip: u32, src_port: u16) TcpTemplate {
+        return initWithFlags(src_ip, src_port, TcpFlags.SYN);
+    }
+
+    pub fn initWithFlags(src_ip: u32, src_port: u16, flags: u16) TcpTemplate {
         var buf: [PACKET_SIZE]u8 = std.mem.zeroes([PACKET_SIZE]u8);
 
         var ip: *Ipv4Header = @ptrCast(@alignCast(&buf[0]));
@@ -69,7 +75,7 @@ pub const SynTemplate = struct {
         tcp.dst_port = 0;
         tcp.seq_num = 0;
         tcp.ack_num = 0;
-        tcp.data_off_flags = toNet(u16, (5 << 12) | TcpFlags.SYN);
+        tcp.data_off_flags = toNet(u16, (5 << 12) | flags);
         tcp.window = toNet(u16, 65535);
         tcp.checksum = 0;
         tcp.urgent = 0;
@@ -77,7 +83,7 @@ pub const SynTemplate = struct {
         return .{ .buf = buf };
     }
 
-    pub fn patch(self: *SynTemplate, dst_ip: u32, dst_port: u16, seq: u32) void {
+    pub fn patch(self: *TcpTemplate, dst_ip: u32, dst_port: u16, seq: u32) void {
         var ip: *Ipv4Header = @ptrCast(@alignCast(&self.buf[0]));
         ip.dst_ip = toNet(u32, dst_ip);
         ip.checksum = 0;
@@ -88,6 +94,18 @@ pub const SynTemplate = struct {
         tcp.seq_num = toNet(u32, seq);
         tcp.checksum = 0;
         tcp.checksum = tcpChecksum(ip, std.mem.asBytes(tcp));
+    }
+
+    pub fn flagsForScanType(scan_type: @import("cli.zig").ScanType) u16 {
+        return switch (scan_type) {
+            .syn => TcpFlags.SYN,
+            .fin => TcpFlags.FIN,
+            .xmas => TcpFlags.FIN | TcpFlags.PSH | TcpFlags.URG,
+            .null_scan => 0,
+            .ack => TcpFlags.ACK,
+            .window => TcpFlags.ACK,
+            else => TcpFlags.SYN,
+        };
     }
 };
 
@@ -162,8 +180,8 @@ test "TcpHeader size" {
     try std.testing.expectEqual(@as(usize, 20), @sizeOf(TcpHeader));
 }
 
-test "SynTemplate builds valid packet" {
-    var tmpl = SynTemplate.init(0xC0A80001, 12345);
+test "TcpTemplate builds valid packet" {
+    var tmpl = TcpTemplate.init(0xC0A80001, 12345);
     tmpl.patch(0xC0A80002, 80, 0xAABBCCDD);
 
     const ip: *const Ipv4Header = @ptrCast(@alignCast(&tmpl.buf[0]));

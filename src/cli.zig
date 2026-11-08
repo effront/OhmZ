@@ -35,6 +35,7 @@ pub const OutputFormat = enum {
     json,
     xml,
     grepable,
+    normal,
     ndjson,
     binary,
 };
@@ -147,6 +148,8 @@ pub fn parse(allocator: std.mem.Allocator) (ParseError || std.mem.Allocator.Erro
             config.os_detect = true;
         } else if (std.mem.eql(u8, arg, "-Pn")) {
             config.skip_discovery = true;
+        } else if (std.mem.eql(u8, arg, "-F")) {
+            config.top_ports = 100;
         } else if (std.mem.eql(u8, arg, "-6")) {
             config.ipv6 = true;
         } else if (std.mem.eql(u8, arg, "--stats")) {
@@ -200,7 +203,7 @@ pub fn parse(allocator: std.mem.Allocator) (ParseError || std.mem.Allocator.Erro
             try config.outputs.append(.{ .format = .grepable, .path = val });
         } else if (std.mem.eql(u8, arg, "-oN")) {
             const val = args.next() orelse return ParseError.MissingArgValue;
-            try config.outputs.append(.{ .format = .ndjson, .path = val });
+            try config.outputs.append(.{ .format = .normal, .path = val });
         } else if (std.mem.eql(u8, arg, "-oB")) {
             const val = args.next() orelse return ParseError.MissingArgValue;
             try config.outputs.append(.{ .format = .binary, .path = val });
@@ -253,12 +256,15 @@ pub fn printUsage(writer: anytype) void {
         \\
         \\PORTS:
         \\  -p <range>      Ports (e.g. -p 22,80,443 or -p 1-65535)
+        \\  -F              Fast scan (top 100 ports)
         \\  --top-ports <n> Most common N ports
         \\
         \\OUTPUT:
-        \\  -oJ/-oX/-oG     JSON / XML / Grepable
-        \\  -oN/-oB         NDJSON / Binary
-        \\  -oA <prefix>    All formats
+        \\  -oN <file>      Normal text output
+        \\  -oX <file>      XML output
+        \\  -oG <file>      Grepable output
+        \\  -oJ <file>      JSON output
+        \\  -oA <prefix>    All formats at once
         \\
         \\PERFORMANCE:
         \\  --rate <pps>    Packets per second

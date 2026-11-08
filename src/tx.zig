@@ -5,10 +5,11 @@ const target_mod = @import("target.zig");
 const blackrock = @import("blackrock.zig");
 const throttle_mod = @import("throttle.zig");
 const stats_mod = @import("stats.zig");
+const cli = @import("cli.zig");
 
 pub const TxEngine = struct {
     sock_fd: std.posix.fd_t,
-    tmpl: packet.SynTemplate,
+    tmpl: packet.TcpTemplate,
     cookie: *const cookie_mod.SynCookie,
     target_space: *const target_mod.TargetSpace,
     shuffler: blackrock.BlackRock,
@@ -19,6 +20,8 @@ pub const TxEngine = struct {
     shard_id: ?u16,
     shard_total: ?u16,
     start_index: u64,
+
+    scan_type: cli.ScanType,
 
     pub fn init(
         cookie: *const cookie_mod.SynCookie,
@@ -31,11 +34,13 @@ pub const TxEngine = struct {
         shard_id: ?u16,
         shard_total: ?u16,
         start_index: u64,
+        scan_type: cli.ScanType,
     ) !TxEngine {
         const fd = try openRawSocket();
+        const flags = packet.TcpTemplate.flagsForScanType(scan_type);
         return .{
             .sock_fd = fd,
-            .tmpl = packet.SynTemplate.init(src_ip, src_port),
+            .tmpl = packet.TcpTemplate.initWithFlags(src_ip, src_port, flags),
             .cookie = cookie,
             .target_space = target_space,
             .shuffler = blackrock.BlackRock.init(target_space.total_targets, seed),
@@ -46,6 +51,7 @@ pub const TxEngine = struct {
             .shard_id = shard_id,
             .shard_total = shard_total,
             .start_index = start_index,
+            .scan_type = scan_type,
         };
     }
 
