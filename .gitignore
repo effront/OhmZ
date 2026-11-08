@@ -3,13 +3,13 @@ zig-out/
 .zig-cache/
 zig-cache/
 
-# Scan output
+# Scan reports and internal docs (may contain target data)
+docs/reports/
+docs/archive/
 results.json
-*.json
 *.xml
 *.grep
 *.ndjson
-*.bin
 
 # IDE
 .idea/
@@ -17,6 +17,6 @@ results.json
 .vscode/
 .DS_Store
 
-# Environment
+# Environment (secrets, API keys, tokens)
 .env*
 !.env.example
