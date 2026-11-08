@@ -8,6 +8,8 @@ pub const ScanRecord = struct {
     status: []const u8,
     service: ?[]const u8,
     version: ?[]const u8 = null,
+    extra: ?[]const u8 = null,
+    tls: bool = false,
     rtt_us: u64,
     timestamp: i64,
 };
@@ -99,6 +101,12 @@ pub const JsonWriter = struct {
         if (rec.version) |ver| {
             w.print(",\"version\":\"{s}\"", .{ver}) catch return;
         }
+        if (rec.extra) |ext| {
+            w.print(",\"extra\":\"{s}\"", .{ext}) catch return;
+        }
+        if (rec.tls) {
+            w.writeAll(",\"tls\":true") catch return;
+        }
 
         w.print(",\"rtt_us\":{d},\"timestamp\":{d}}}", .{ rec.rtt_us, rec.timestamp }) catch return;
     }
@@ -187,7 +195,7 @@ pub const XmlWriter = struct {
         };
         const w = xw.bw.writer();
         w.writeAll("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n") catch {};
-        w.writeAll("<ohmzscan scanner=\"ohmz\" version=\"0.2.0\">\n") catch {};
+        w.writeAll("<ohmzscan scanner=\"ohmz\" version=\"0.3.0\">\n") catch {};
         return xw;
     }
 

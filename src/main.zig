@@ -12,7 +12,7 @@ const progress_mod = @import("progress.zig");
 const output_mod = @import("output.zig");
 const banner_mod = @import("banner.zig");
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -171,15 +171,14 @@ pub fn main() !void {
         }
     }.lessThan);
 
-    var banners: ?[]banner_mod.BannerInfo = null;
+    var banners: ?[]banner_mod.ServiceInfo = null;
     defer if (banners) |b| allocator.free(b);
 
     if (open_ports.len > 0 and config.banner_grab) {
-        try stderr.print("\nService detection on {d} open ports...\n", .{open_ports.len});
-        const b = try allocator.alloc(banner_mod.BannerInfo, open_ports.len);
-        for (open_ports, 0..) |p, i| {
-            b[i] = banner_mod.grab(p.ip, p.port);
-        }
+        const workers: usize = @min(open_ports.len, 16);
+        try stderr.print("\nService detection on {d} open ports ({d} workers)...\n", .{ open_ports.len, workers });
+        const b = try allocator.alloc(banner_mod.ServiceInfo, open_ports.len);
+        banner_mod.detectAll(open_ports, b, workers);
         banners = b;
     }
 
@@ -216,9 +215,12 @@ pub fn main() !void {
             for (open_ports, 0..) |r, i| {
                 var pbuf: [12]u8 = undefined;
                 const pstr = std.fmt.bufPrint(&pbuf, "{d}/tcp", .{r.port}) catch "?/tcp";
-                const svc = serviceName(r.port);
+                const svc = if (has_versions) blk: {
+                    const detected = banners.?[i].name();
+                    break :blk if (detected.len > 0) detected else serviceName(r.port);
+                } else serviceName(r.port);
                 if (has_versions) {
-                    const ver = banners.?[i].str();
+                    const ver = banners.?[i].version();
                     if (ver.len > 0) {
                         try stderr.print("{s:<9} \x1b[32mopen\x1b[0m    {s:<14} {s}\n", .{ pstr, svc, ver });
                     } else {
@@ -239,9 +241,12 @@ pub fn main() !void {
                 const hstr = target_mod.formatIp(&hbuf, r.ip);
                 var pbuf: [12]u8 = undefined;
                 const pstr = std.fmt.bufPrint(&pbuf, "{d}/tcp", .{r.port}) catch "?/tcp";
-                const svc = serviceName(r.port);
+                const svc = if (has_versions) blk: {
+                    const detected = banners.?[i].name();
+                    break :blk if (detected.len > 0) detected else serviceName(r.port);
+                } else serviceName(r.port);
                 if (has_versions) {
-                    const ver = banners.?[i].str();
+                    const ver = banners.?[i].version();
                     if (ver.len > 0) {
                         try stderr.print("{s:<17} {s:<9} \x1b[32mopen\x1b[0m    {s:<14} {s}\n", .{ hstr, pstr, svc, ver });
                     } else {
@@ -353,17 +358,25 @@ fn writeOneOutput(
     }
 }
 
-fn makeRecord(r: rx_mod.OpenPort, banners: ?[]banner_mod.BannerInfo, i: usize, ts: i64) output_mod.ScanRecord {
+fn makeRecord(r: rx_mod.OpenPort, banners: ?[]banner_mod.ServiceInfo, i: usize, ts: i64) output_mod.ScanRecord {
     return .{
         .ip = r.ip,
         .port = r.port,
         .protocol = "tcp",
         .status = "open",
-        .service = svcOrNull(serviceName(r.port)),
+        .service = if (banners) |b| blk: {
+            const n = b[i].name();
+            break :blk if (n.len > 0) n else svcOrNull(serviceName(r.port));
+        } else svcOrNull(serviceName(r.port)),
         .version = if (banners) |b| blk: {
-            const v = b[i].str();
+            const v = b[i].version();
             break :blk if (v.len > 0) v else null;
         } else null,
+        .extra = if (banners) |b| blk: {
+            const e = b[i].extra();
+            break :blk if (e.len > 0) e else null;
+        } else null,
+        .tls = if (banners) |b| b[i].tls else false,
         .rtt_us = 0,
         .timestamp = ts,
     };
