@@ -109,7 +109,9 @@ pub const JsonWriter = struct {
             w.writeAll(",\"tls\":true") catch return;
         }
         if (rec.scripts) |scr| {
-            w.print(",\"scripts\":\"{s}\"", .{scr}) catch return;
+            w.writeAll(",\"scripts\":\"") catch return;
+            writeJsonEscaped(w, scr);
+            w.writeByte('"') catch return;
         }
 
         w.print(",\"rtt_us\":{d},\"timestamp\":{d}}}", .{ rec.rtt_us, rec.timestamp }) catch return;
@@ -289,6 +291,25 @@ pub const NdjsonWriter = struct {
         self.file.close();
     }
 };
+
+fn writeJsonEscaped(w: anytype, s: []const u8) void {
+    for (s) |c| {
+        switch (c) {
+            '"' => w.writeAll("\\\"") catch return,
+            '\\' => w.writeAll("\\\\") catch return,
+            '\n' => w.writeAll("\\n") catch return,
+            '\r' => w.writeAll("\\r") catch return,
+            '\t' => w.writeAll("\\t") catch return,
+            else => {
+                if (c < 0x20) {
+                    w.print("\\u{x:0>4}", .{c}) catch return;
+                } else {
+                    w.writeByte(c) catch return;
+                }
+            },
+        }
+    }
+}
 
 pub fn printResult(writer: anytype, rec: ScanRecord) void {
     var ip_buf: [16]u8 = undefined;

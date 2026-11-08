@@ -354,10 +354,14 @@ pub fn main() !void {
 
             // OS detection result for this host
             if (os_results) |osr| {
-                if (osr.len > 0 and osr[0].confidence > 0) {
-                    try stderr.print("\nOS: \x1b[1;35m{s}\x1b[0m ({d}% confidence, TTL={d})\n", .{
-                        osr[0].name(), osr[0].confidence, osr[0].ttl,
-                    });
+                const host_ip = open_ports[0].ip;
+                for (0..unique_ip_count) |ui| {
+                    if (unique_ips_buf[ui] == host_ip and osr[ui].confidence > 0) {
+                        try stderr.print("\nOS: \x1b[1;35m{s}\x1b[0m ({d}% confidence, TTL={d})\n", .{
+                            osr[ui].name(), osr[ui].confidence, osr[ui].ttl,
+                        });
+                        break;
+                    }
                 }
             }
         } else {
@@ -499,9 +503,6 @@ fn writeOneOutput(
     unique_ips: []const u32,
     ts: i64,
 ) void {
-    _ = os_results;
-    _ = trace_results;
-    _ = unique_ips;
     switch (format) {
         .json => {
             var w = output_mod.JsonWriter.init(path) catch return;
@@ -515,6 +516,7 @@ fn writeOneOutput(
             for (open_ports, 0..) |r, i| {
                 w.writeRecord(makeRecord(r, banners, script_results, i, ts));
             }
+            writeOsTraceXml(&w, os_results, trace_results, unique_ips);
             w.finish();
         },
         .grepable => {
@@ -534,6 +536,7 @@ fn writeOneOutput(
                 }
                 w.writeRecord(makeRecord(r, banners, script_results, i, ts));
             }
+            writeOsTraceNormal(&w, os_results, trace_results, unique_ips);
             w.finish();
         },
         .ndjson, .binary => {
@@ -623,6 +626,67 @@ fn scanTypeName(st: cli.ScanType) []const u8 {
         .window => "TCP Window (-sW)",
         .udp => "UDP (-sU)",
     };
+}
+
+fn writeOsTraceNormal(w: *output_mod.NormalWriter, os_results: ?[]os_mod.OsInfo, trace_results: ?[]traceroute_mod.TraceResult, unique_ips: []const u32) void {
+    const bw = w.bw.writer();
+    if (os_results) |osr| {
+        for (osr, 0..) |info, ui| {
+            if (info.confidence > 0) {
+                var ip_buf: [16]u8 = undefined;
+                const ip_str = target_mod.formatIp(&ip_buf, unique_ips[ui]);
+                bw.print("OS [{s}]: {s} ({d}% confidence, TTL={d})\n", .{ ip_str, info.name(), info.confidence, info.ttl }) catch {};
+            }
+        }
+    }
+    if (trace_results) |tr| {
+        for (tr, 0..) |trace, ui| {
+            var ip_buf: [16]u8 = undefined;
+            const ip_str = target_mod.formatIp(&ip_buf, unique_ips[ui]);
+            bw.print("\nTRACEROUTE to {s}:\n", .{ip_str}) catch {};
+            for (0..trace.hop_count) |hi| {
+                const hop = trace.hops[hi];
+                if (hop.reached()) {
+                    var hop_buf: [16]u8 = undefined;
+                    const hop_str = target_mod.formatIp(&hop_buf, hop.ip);
+                    bw.print("  {d:>2}  {s:<16} {d:.1}ms\n", .{ hop.ttl, hop_str, @as(f64, @floatFromInt(hop.rtt_us)) / 1000.0 }) catch {};
+                } else {
+                    bw.print("  {d:>2}  *\n", .{hop.ttl}) catch {};
+                }
+            }
+        }
+    }
+}
+
+fn writeOsTraceXml(w: *output_mod.XmlWriter, os_results: ?[]os_mod.OsInfo, trace_results: ?[]traceroute_mod.TraceResult, unique_ips: []const u32) void {
+    const bw = w.bw.writer();
+    if (os_results) |osr| {
+        for (osr, 0..) |info, ui| {
+            if (info.confidence > 0) {
+                var ip_buf: [16]u8 = undefined;
+                const ip_str = target_mod.formatIp(&ip_buf, unique_ips[ui]);
+                bw.print("  <os addr=\"{s}\">\n    <osmatch name=\"{s}\" accuracy=\"{d}\"/>\n  </os>\n", .{ ip_str, info.name(), info.confidence }) catch {};
+            }
+        }
+    }
+    if (trace_results) |tr| {
+        for (tr, 0..) |trace, ui| {
+            var ip_buf: [16]u8 = undefined;
+            const ip_str = target_mod.formatIp(&ip_buf, unique_ips[ui]);
+            bw.print("  <trace to=\"{s}\">\n", .{ip_str}) catch {};
+            for (0..trace.hop_count) |hi| {
+                const hop = trace.hops[hi];
+                if (hop.reached()) {
+                    var hop_buf: [16]u8 = undefined;
+                    const hop_str = target_mod.formatIp(&hop_buf, hop.ip);
+                    bw.print("    <hop ttl=\"{d}\" ipaddr=\"{s}\" rtt=\"{d:.1}\"/>\n", .{ hop.ttl, hop_str, @as(f64, @floatFromInt(hop.rtt_us)) / 1000.0 }) catch {};
+                } else {
+                    bw.print("    <hop ttl=\"{d}\"/>\n", .{hop.ttl}) catch {};
+                }
+            }
+            bw.writeAll("  </trace>\n") catch {};
+        }
+    }
 }
 
 fn serviceName(port: u16) []const u8 {

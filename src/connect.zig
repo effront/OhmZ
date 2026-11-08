@@ -55,9 +55,11 @@ pub const ConnectEngine = struct {
         while (index < self.target_space.total_targets) {
             if (self.stats.isDone()) break;
 
+            const batch = self.throttle.nextBatch();
+            const max_this_batch: usize = @min(batch.count, BATCH_SIZE);
             var batch_count: usize = 0;
 
-            while (batch_count < BATCH_SIZE and index < self.target_space.total_targets) {
+            while (batch_count < max_this_batch and index < self.target_space.total_targets) {
                 if (self.shard_total) |total| {
                     if ((index % @as(u64, total)) != @as(u64, (self.shard_id orelse 1) - 1)) {
                         index += 1;
@@ -81,35 +83,31 @@ pub const ConnectEngine = struct {
                     .addr = std.mem.nativeToBig(u32, t.ip),
                 };
 
-                const connected_immediately = blk: {
-                    std.posix.connect(fd, @ptrCast(&dest), @sizeOf(std.posix.sockaddr.in)) catch |err| {
-                        if (err == error.WouldBlock) break :blk false;
-                        std.posix.close(fd);
-                        self.stats.addSent(1);
-                        self.stats.addRecv(1);
-                        self.stats.addClosed();
-                        break :blk true;
-                    };
-                    break :blk true;
-                };
-
-                if (connected_immediately) {
-                    if (std.posix.getsockoptError(fd)) |_| {} else |_| {
+                std.posix.connect(fd, @ptrCast(&dest), @sizeOf(std.posix.sockaddr.in)) catch |err| {
+                    if (err == error.WouldBlock) {
+                        fds[batch_count] = fd;
+                        ips[batch_count] = t.ip;
+                        ports[batch_count] = t.port;
+                        pending[batch_count] = true;
+                        batch_count += 1;
                         continue;
                     }
-                    self.markOpen(t.ip, t.port);
                     std.posix.close(fd);
+                    self.stats.addSent(1);
+                    self.stats.addRecv(1);
+                    self.stats.addClosed();
                     continue;
-                }
+                };
 
-                fds[batch_count] = fd;
-                ips[batch_count] = t.ip;
-                ports[batch_count] = t.port;
-                pending[batch_count] = true;
-                batch_count += 1;
+                self.stats.addSent(1);
+                self.markOpen(t.ip, t.port);
+                std.posix.close(fd);
             }
 
-            if (batch_count == 0) continue;
+            if (batch_count == 0) {
+                if (batch.sleep_ns > 0) std.time.sleep(batch.sleep_ns);
+                continue;
+            }
 
             self.stats.addSent(batch_count);
 
@@ -165,6 +163,8 @@ pub const ConnectEngine = struct {
                     std.posix.close(fds[i]);
                 }
             }
+
+            if (batch.sleep_ns > 0) std.time.sleep(batch.sleep_ns);
         }
 
         self.stats.markDone();
