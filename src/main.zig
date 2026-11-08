@@ -87,10 +87,14 @@ pub fn main() !void {
     var seed_bytes: u64 = 0;
     std.posix.getrandom(std.mem.asBytes(&seed_bytes)) catch {};
 
-    var open_ports: []rx_mod.OpenPort = &.{};
+    var connect_engine: ?connect_mod.ConnectEngine = null;
+    defer if (connect_engine) |*ce| ce.deinit();
+
+    var rx_engine: ?rx_mod.RxEngine = null;
+    defer if (rx_engine) |*re| re.deinit();
 
     if (config.scan_type == .connect) {
-        var engine = connect_mod.ConnectEngine.init(
+        connect_engine = connect_mod.ConnectEngine.init(
             allocator,
             &target_space,
             &scan_stats,
@@ -100,12 +104,9 @@ pub fn main() !void {
             config.shard_total,
             0,
         );
-        defer engine.deinit();
 
-        engine.run();
+        connect_engine.?.run();
         bar.join();
-
-        open_ports = engine.results.open_list.items;
     } else {
         var tx_engine = tx_mod.TxEngine.init(
             &syn_cookie,
@@ -127,7 +128,7 @@ pub fn main() !void {
         };
         defer tx_engine.deinit();
 
-        var rx_engine = rx_mod.RxEngine.init(
+        rx_engine = rx_mod.RxEngine.init(
             allocator,
             &syn_cookie,
             &scan_stats,
@@ -139,10 +140,9 @@ pub fn main() !void {
             bar.join();
             std.process.exit(1);
         };
-        defer rx_engine.deinit();
 
         const tx_handle = try std.Thread.spawn(.{}, txThreadFn, .{&tx_engine});
-        const rx_handle = try std.Thread.spawn(.{}, rxThreadFn, .{&rx_engine});
+        const rx_handle = try std.Thread.spawn(.{}, rxThreadFn, .{&rx_engine.?});
 
         tx_handle.join();
         std.time.sleep(2 * std.time.ns_per_s);
@@ -150,9 +150,14 @@ pub fn main() !void {
 
         rx_handle.join();
         bar.join();
-
-        open_ports = rx_engine.results.open_list.items;
     }
+
+    const open_ports = if (connect_engine) |*ce|
+        ce.results.open_list.items
+    else if (rx_engine) |*re|
+        re.results.open_list.items
+    else
+        @as([]rx_mod.OpenPort, &.{});
 
     const snap = scan_stats.snapshot();
 

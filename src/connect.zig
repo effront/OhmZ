@@ -92,17 +92,17 @@ pub const ConnectEngine = struct {
             .addr = std.mem.nativeToBig(u32, ip),
         };
 
-        const connect_result = std.posix.connect(fd, @ptrCast(&dest), @sizeOf(std.posix.sockaddr.in));
-        if (connect_result) |_| {
-            self.markOpen(ip, port);
-            return;
-        } else |err| {
-            if (err != error.WouldBlock) {
+        const need_poll: bool = blk: {
+            std.posix.connect(fd, @ptrCast(&dest), @sizeOf(std.posix.sockaddr.in)) catch |err| {
+                if (err == error.WouldBlock) break :blk true;
                 self.stats.addRecv(1);
                 self.stats.addClosed();
                 return;
-            }
-        }
+            };
+            self.markOpen(ip, port);
+            return;
+        };
+        _ = need_poll;
 
         var pfd = [1]std.posix.pollfd{.{
             .fd = fd,
@@ -110,24 +110,17 @@ pub const ConnectEngine = struct {
             .revents = 0,
         }};
 
-        const ready = std.posix.poll(&pfd, CONNECT_TIMEOUT_MS) catch {
-            return;
-        };
+        const ready = std.posix.poll(&pfd, CONNECT_TIMEOUT_MS) catch return;
 
-        if (ready == 0) {
-            return;
-        }
+        if (ready == 0) return;
 
         if (pfd[0].revents & std.posix.POLL.OUT != 0) {
-            var err_val: c_int = 0;
-            const err_bytes = std.mem.asBytes(&err_val);
-            std.posix.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, err_bytes) catch return;
-            if (err_val == 0) {
-                self.markOpen(ip, port);
-            } else {
+            std.posix.getsockoptError(fd) catch {
                 self.stats.addRecv(1);
                 self.stats.addClosed();
-            }
+                return;
+            };
+            self.markOpen(ip, port);
         } else {
             self.stats.addRecv(1);
             self.stats.addClosed();
