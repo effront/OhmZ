@@ -10,6 +10,8 @@ COPY src/ src/
 COPY build.zig .
 RUN zig build -Doptimize=ReleaseSafe
 
-FROM scratch
-COPY --from=build /build/zig-out/bin/ohmz /ohmz
-ENTRYPOINT ["/ohmz"]
+FROM alpine:3.21
+RUN adduser -D -h /home/ohmz ohmz
+COPY --from=build /build/zig-out/bin/ohmz /usr/local/bin/ohmz
+USER ohmz
+ENTRYPOINT ["ohmz"]
