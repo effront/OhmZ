@@ -15,6 +15,7 @@ pub const TlsInfo = struct {
     issuer_cn_len: u8 = 0,
     not_after_buf: [24]u8 = .{0} ** 24,
     not_after_len: u8 = 0,
+    tls_minor: u8 = 0,
     valid: bool = false,
 
     pub fn versionStr(self: *const TlsInfo) []const u8 {
@@ -69,15 +70,7 @@ pub fn probe(ip: u32, port: u16) TlsInfo {
         const n = std.posix.read(fd, buf[total..]) catch break;
         if (n == 0) break;
         total += n;
-        if (total >= 5) {
-            const record_len = readU16(buf[3..5]);
-            if (total >= 5 + @as(usize, record_len)) {
-                if (total >= 10 + @as(usize, record_len)) {
-                    const next_len = readU16(buf[5 + @as(usize, record_len) + 3 .. 5 + @as(usize, record_len) + 5]);
-                    if (total >= 5 + @as(usize, record_len) + 5 + @as(usize, next_len)) break;
-                } else break;
-            }
-        }
+        if (hasAllRecords(buf[0..total])) break;
     }
 
     if (total < 5) return info;
@@ -86,6 +79,28 @@ pub fn probe(ip: u32, port: u16) TlsInfo {
     parseServerMessages(data, &info);
 
     return info;
+}
+
+fn hasAllRecords(data: []const u8) bool {
+    var pos: usize = 0;
+    var saw_cert = false;
+    while (pos + 5 <= data.len) {
+        const record_len = readU16(data[pos + 3 .. pos + 5]);
+        if (pos + 5 + record_len > data.len) return false;
+        if (data[pos] == 22) {
+            var hpos: usize = pos + 5;
+            const hend = hpos + record_len;
+            while (hpos + 4 <= hend) {
+                const hs_type = data[hpos];
+                const hs_len = readU24(data[hpos + 1 .. hpos + 4]);
+                if (hs_type == 11) saw_cert = true;
+                hpos += 4 + hs_len;
+            }
+        }
+        pos += 5 + record_len;
+        if (saw_cert) return true;
+    }
+    return false;
 }
 
 fn parseServerMessages(data: []const u8, info: *TlsInfo) void {
@@ -157,6 +172,8 @@ fn parseServerHello(data: []const u8, info: *TlsInfo) void {
         }
     }
 
+    info.tls_minor = actual_minor;
+
     const ver_str = tlsVersionName(actual_major, actual_minor);
     info.version_len = TlsInfo.setStr(&info.version_buf, ver_str);
 
@@ -168,10 +185,21 @@ fn parseServerHello(data: []const u8, info: *TlsInfo) void {
 
 fn parseCertificateMsg(data: []const u8, info: *TlsInfo) void {
     if (data.len < 3) return;
-    const total_len = readU24(data[0..3]);
-    _ = total_len;
 
-    var pos: usize = 3;
+    var pos: usize = 0;
+
+    // TLS 1.3 (minor=4): request_context length prefix before cert list
+    if (info.tls_minor >= 4) {
+        if (pos >= data.len) return;
+        const ctx_len: usize = data[pos];
+        pos += 1 + ctx_len;
+    }
+
+    if (pos + 3 > data.len) return;
+    const total_len = readU24(data[pos .. pos + 3]);
+    _ = total_len;
+    pos += 3;
+
     if (pos + 3 > data.len) return;
     const cert_len = readU24(data[pos .. pos + 3]);
     pos += 3;
