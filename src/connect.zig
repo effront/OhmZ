@@ -135,7 +135,7 @@ pub const ConnectEngine = struct {
             for (pfds[0..active]) |*pfd| pfd.revents = 0;
             _ = std.posix.poll(pfds[0..active], poll_timeout) catch 0;
 
-            const check_ms = std.time.milliTimestamp();
+            const check_ms = @as(i64, @intCast(@divFloor(std.time.nanoTimestamp(), 1_000_000)));
             var i: usize = 0;
             while (i < active) {
                 var remove = false;
