@@ -6,8 +6,9 @@ const ScanSnapshot = stats_mod.ScanSnapshot;
 const REFRESH_NS: u64 = 50 * std.time.ns_per_ms;
 const SLOW_REFRESH_NS: u64 = 250 * std.time.ns_per_ms;
 const RAMP_TICKS: u32 = 20;
-const BAR_WIDTH: usize = 30;
 const EWMA_ALPHA: f64 = 0.3;
+const MIN_BAR_WIDTH: usize = 8;
+const FIXED_COLS: usize = 32;
 
 const BLOCK_FULL: []const u8 = "\u{2588}";
 const BLOCK_LIGHT: []const u8 = "\u{2591}";
@@ -44,7 +45,7 @@ pub const ProgressBar = struct {
         var smoothed_pps: f64 = 0;
         var display_progress: f64 = 0;
 
-        renderLineSmooth(w, 0, prev_snap, 0, 0, self.show_verbose);
+        renderLineSmooth(w, 0, prev_snap, 0, 0, self.show_verbose, barWidth());
 
         var tick: u32 = 0;
         while (!self.stats.isDone()) {
@@ -64,7 +65,7 @@ pub const ProgressBar = struct {
             display_progress = smoothProgress(display_progress, target_progress);
 
             const eta_secs = snap.eta(smoothed_pps);
-            renderLineSmooth(w, display_progress, snap, smoothed_pps, eta_secs, self.show_verbose);
+            renderLineSmooth(w, display_progress, snap, smoothed_pps, eta_secs, self.show_verbose, barWidth());
             prev_snap = snap;
         }
 
@@ -72,7 +73,7 @@ pub const ProgressBar = struct {
         const final_pps = final_snap.deltaPps(prev_snap);
         smoothed_pps = EWMA_ALPHA * final_pps + (1.0 - EWMA_ALPHA) * smoothed_pps;
 
-        renderLineSmooth(w, 1.0, final_snap, smoothed_pps, 0, self.show_verbose);
+        renderLineSmooth(w, 1.0, final_snap, smoothed_pps, 0, self.show_verbose, barWidth());
         renderComplete(w, final_snap, smoothed_pps);
     }
 
@@ -83,10 +84,10 @@ pub const ProgressBar = struct {
         return @min(current + step, target);
     }
 
-    fn renderLineSmooth(w: anytype, progress: f64, snap: ScanSnapshot, pps: f64, eta_secs: f64, verbose: bool) void {
+    fn renderLineSmooth(w: anytype, progress: f64, snap: ScanSnapshot, pps: f64, eta_secs: f64, verbose: bool, bw: usize) void {
         const pct: u8 = @intFromFloat(@min(progress * 100.0, 100.0));
-        const filled: usize = @intFromFloat(@min(progress * @as(f64, @floatFromInt(BAR_WIDTH)), @as(f64, @floatFromInt(BAR_WIDTH))));
-        const empty: usize = BAR_WIDTH - filled;
+        const filled: usize = @intFromFloat(@min(progress * @as(f64, @floatFromInt(bw)), @as(f64, @floatFromInt(bw))));
+        const empty: usize = bw - filled;
 
         w.print("\r\x1b[K\x1b[1;37m{d:>3}%\x1b[0m \x1b[36m", .{pct}) catch return;
         for (0..filled) |_| w.writeAll(BLOCK_FULL) catch return;
@@ -165,6 +166,20 @@ pub const ProgressBar = struct {
         } else {
             w.print("{d:.1}s", .{secs}) catch return;
         }
+    }
+
+    fn barWidth() usize {
+        const cols = getTermCols();
+        if (cols <= FIXED_COLS + MIN_BAR_WIDTH) return MIN_BAR_WIDTH;
+        return cols - FIXED_COLS;
+    }
+
+    fn getTermCols() usize {
+        const WinSize = extern struct { row: u16, col: u16, xpix: u16, ypix: u16 };
+        var ws: WinSize = std.mem.zeroes(WinSize);
+        const rc = std.os.linux.ioctl(2, 0x5413, @intFromPtr(&ws));
+        if (@as(isize, @bitCast(rc)) >= 0 and ws.col > 0) return ws.col;
+        return 80;
     }
 
     fn hideCursor(w: anytype) void {
