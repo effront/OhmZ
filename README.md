@@ -84,16 +84,22 @@
 ```
 +---------------------------------------------------------------------------+
 |  BANNER GRABBING (-sV)                                                    |
-|  [x] HTTP            -- Server header, status, redirect chain             |
-|  [x] SSH             -- version string, key exchange algorithms           |
-|  [x] TLS/SSL         -- version, ciphers, certificate (CN, SAN, expiry)   |
-|  [x] FTP             -- server banner, AUTH TLS support                   |
-|  [x] SMTP            -- MTA version, EHLO capabilities                    |
-|  [x] SMB             -- version, hostname, domain, shares                 |
-|  [x] DNS             -- version.bind, recursion, zone transfer            |
+|  [x] HTTP            -- Server header, fingerprinting (30+ web apps)      |
+|  [x] SSH             -- version string (OpenSSH extraction)               |
+|  [x] TLS/SSL         -- version, ciphers, ALPN, certificate (CN, SAN)     |
+|  [x] FTP             -- server banner                                     |
+|  [x] SMTP            -- MTA version, greeting banner                      |
 |  [x] MySQL           -- version, auth plugin, capabilities                |
-|  [x] Redis           -- version, memory, auth status                      |
-|  [x] RDP             -- NLA support, protocol version                     |
+|  [x] PostgreSQL      -- version, auth method                              |
+|  [x] Redis           -- version, auth status, cluster mode                |
+|  [x] Memcached       -- version extraction                                |
+|  [x] MongoDB         -- server info via isMaster                          |
+|  [x] MQTT            -- broker detection via CONNECT                      |
+|  [x] AMQP            -- RabbitMQ/broker detection                         |
+|  [x] RDP             -- X.224 Connection Confirm                          |
+|  [x] SMB             -- SMB1/SMB2 Negotiate                               |
+|  [x] FastAPI         -- auto-probe /openapi.json for app title+version    |
+|  [x] Data-driven     -- 35 signatures via @embedFile (zero runtime cost)  |
 +---------------------------------------------------------------------------+
 ```
 
@@ -107,6 +113,10 @@
 |  SCRIPT SCANNING (-sC)                                                    |
 |  [x] http-title       -- extract page title from HTTP response            |
 |  [x] http-robots      -- parse robots.txt disallow entries                |
+|  [x] http-openapi     -- detect OpenAPI spec, extract API title           |
+|  [x] http-docs        -- detect Swagger UI / ReDoc documentation          |
+|  [x] http-404         -- fingerprint framework from error pages           |
+|  [x] http-proxy       -- detect reverse proxy (Traefik/HAProxy/Envoy)     |
 |  [x] ssh-hostkey      -- SSH version string and host key                  |
 |  [x] smtp-commands    -- EHLO extension enumeration                       |
 |  [x] mysql-info       -- version, auth plugin, capabilities               |
@@ -183,7 +193,7 @@ brew tap effront/tap && brew install ohmz
 docker run --cap-add=NET_RAW ghcr.io/effront/ohmz -sS 192.168.1.0/24
 
 # Or download the .deb
-sudo dpkg -i ohmz_0.4.0_amd64.deb
+sudo dpkg -i ohmz_0.6.0_amd64.deb
 ```
 
 ### Prerequisites
@@ -355,7 +365,7 @@ OhmZ/
     connect.zig           ConnectEngine: batch concurrent connect() for -sT
     cookie.zig            SipHash-2-4 SYN cookie generation/validation
     os.zig                OS fingerprinting: TCP stack analysis (TTL, window, options)
-    scripts.zig           Default script engine (http-title, ssh-hostkey, etc.)
+    scripts.zig           Script engine (http-title, openapi, 404, proxy, etc.)
     traceroute.zig        UDP traceroute with ICMP listener
     blackrock.zig         BlackRock cipher: O(1) target space permutation
     throttle.zig          Rate limiter: 256-bucket sliding window
@@ -364,7 +374,11 @@ OhmZ/
     target.zig            CIDR parser, target space builder, top ports wiring
     ports.zig             Top 1000 ports frequency table (nmap ranking)
     output.zig            Writers: Normal, JSON, XML, Grepable, NDJSON
-    banner.zig            Banner grabbing: HTTP, SSH, FTP, SMTP, TLS
+    banner.zig            Banner grabbing: 16 protocols + HTTP fingerprinting
+    tls.zig               TLS handshake: ClientHello, ALPN, cert/SAN parsing
+    sigs.zig              Data-driven signatures (@embedFile comptime parser)
+    data/
+      service-probes      Signature definitions (35 sigs, pipe-delimited)
   build.zig               Build system (static, cross-compile)
   Dockerfile              Multi-stage Alpine build, non-root runtime
   install.sh              Auto-detect arch/OS installer script
@@ -621,7 +635,16 @@ zig build -Dtarget=arm-linux-gnueabihf # ARM 32-bit (Tier 3)
 |       |  aggressive mode (-A), batch connect     |          |
 |       |  engine (512 concurrent, poll loop)      |          |
 +-------+------------------------------------------+----------+
-|   5   |  Advanced: IPv6, SCTP, io_uring backend, |  PLAN    |
+|   5   |  Hardening: service detection fixes,     |  DONE    |
+|       |  case-insensitive headers, HTTP          |  v0.5.x  |
+|       |  fingerprinting, ETA display fix         |          |
++-------+------------------------------------------+----------+
+|   6   |  Detection v2: 16 protocol probes,       |  DONE    |
+|       |  TLS ALPN/SAN, data-driven sigs (35),    |  v0.6.0  |
+|       |  FastAPI auto-discovery, 88 unit tests,  |          |
+|       |  all output writers fixed, 4 new scripts |          |
++-------+------------------------------------------+----------+
+|   7   |  Advanced: IPv6, SCTP, io_uring backend, |  PLAN    |
 |       |  evasion techniques, multi-NIC, sharding,|          |
 |       |  plugin system (comptime + WASM)         |          |
 +=======+==========================================+==========+
