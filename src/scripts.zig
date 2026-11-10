@@ -34,11 +34,11 @@ pub const ScriptResult = struct {
 };
 
 pub const HostScripts = struct {
-    results: [8]ScriptResult = .{ScriptResult{}} ** 8,
+    results: [12]ScriptResult = .{ScriptResult{}} ** 12,
     count: u8 = 0,
 
     pub fn add(self: *HostScripts, script_id: []const u8, output_text: []const u8) void {
-        if (self.count >= 8) return;
+        if (self.count >= 12) return;
         self.results[self.count].setId(script_id);
         self.results[self.count].setOutput(output_text);
         self.count += 1;
@@ -50,16 +50,35 @@ pub const HostScripts = struct {
 // ---------------------------------------------------------------------------
 
 pub fn runDefault(ip: u32, port: u16) HostScripts {
+    return runScripts(ip, port, false);
+}
+
+pub fn runScripts(ip: u32, port: u16, extended: bool) HostScripts {
     var hs = HostScripts{};
     switch (port) {
         80, 8080, 8888, 3000, 5000, 8000, 9090 => {
             scriptHttpTitle(ip, port, &hs);
             scriptHttpRobots(ip, port, &hs);
+            if (extended) {
+                scriptHttpOpenapi(ip, port, &hs);
+                scriptHttpDocs(ip, port, &hs);
+                scriptHttp404(ip, port, &hs);
+                scriptHttpProxy(ip, port, &hs);
+            }
         },
         22, 2222 => scriptSshHostkey(ip, port, &hs),
         25, 587 => scriptSmtpCommands(ip, port, &hs),
         3306, 33060 => scriptMysqlInfo(ip, port, &hs),
-        else => {},
+        else => {
+            if (extended) {
+                // Try HTTP scripts on non-standard ports too
+                scriptHttpTitle(ip, port, &hs);
+                if (hs.count > 0) {
+                    scriptHttpOpenapi(ip, port, &hs);
+                    scriptHttp404(ip, port, &hs);
+                }
+            }
+        },
     }
     return hs;
 }
@@ -69,11 +88,20 @@ pub fn runAll(
     results: []HostScripts,
     num_workers: usize,
 ) void {
+    runAllEx(ports, results, num_workers, false);
+}
+
+pub fn runAllEx(
+    ports: []const rx_mod.OpenPort,
+    results: []HostScripts,
+    num_workers: usize,
+    extended: bool,
+) void {
     if (ports.len == 0) return;
 
     if (ports.len == 1 or num_workers <= 1) {
         for (ports, 0..) |p, i| {
-            results[i] = runDefault(p.ip, p.port);
+            results[i] = runScripts(p.ip, p.port, extended);
         }
         return;
     }
@@ -84,12 +112,14 @@ pub fn runAll(
         ports: []const rx_mod.OpenPort,
         results: []HostScripts,
         next: *std.atomic.Value(usize),
+        ext: bool,
     };
 
     var ctx = Ctx{
         .ports = ports,
         .results = results,
         .next = &next_idx,
+        .ext = extended,
     };
 
     const actual = @min(num_workers, @min(ports.len, MAX_WORKERS));
@@ -101,7 +131,7 @@ pub fn runAll(
                 while (true) {
                     const i = c.next.fetchAdd(1, .monotonic);
                     if (i >= c.ports.len) break;
-                    c.results[i] = runDefault(c.ports[i].ip, c.ports[i].port);
+                    c.results[i] = runScripts(c.ports[i].ip, c.ports[i].port, c.ext);
                 }
             }
         }.run, .{&ctx}) catch null;
@@ -396,6 +426,166 @@ fn scriptMysqlInfo(ip: u32, port: u16, hs: *HostScripts) void {
     }
 
     hs.add("mysql-info", out_buf[0..out_len]);
+}
+
+// ---------------------------------------------------------------------------
+// Script: http-openapi (extended)
+// ---------------------------------------------------------------------------
+
+fn scriptHttpOpenapi(ip: u32, port: u16, hs: *HostScripts) void {
+    const fd = openSocket(ip, port) orelse return;
+    defer std.posix.close(fd);
+
+    var ip_buf: [16]u8 = undefined;
+    const ip_str = formatIp(&ip_buf, ip);
+    var req_buf: [160]u8 = undefined;
+    const request = std.fmt.bufPrint(&req_buf, "GET /openapi.json HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{ip_str}) catch return;
+    _ = std.posix.write(fd, request) catch return;
+
+    var buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = std.posix.read(fd, buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    if (total < 15) return;
+
+    const data = buf[0..total];
+    if (!std.mem.startsWith(u8, data, "HTTP/1.")) return;
+    if (!std.mem.eql(u8, data[9..12], "200")) return;
+
+    if (std.mem.indexOf(u8, data, "\"openapi\"") != null or std.mem.indexOf(u8, data, "\"swagger\"") != null) {
+        var out_buf: [128]u8 = undefined;
+        if (findJsonStringValue(data, "\"title\"")) |title| {
+            const out = std.fmt.bufPrint(&out_buf, "OpenAPI: {s}", .{title}) catch "OpenAPI spec found";
+            hs.add("http-openapi", out);
+        } else {
+            hs.add("http-openapi", "OpenAPI spec found");
+        }
+    }
+}
+
+fn findJsonStringValue(data: []const u8, key_with_quote: []const u8) ?[]const u8 {
+    // Find "key":"value" pattern
+    const key_pos = std.mem.indexOf(u8, data, key_with_quote) orelse return null;
+    var pos = key_pos + key_with_quote.len;
+    // Skip whitespace and colon
+    while (pos < data.len and (data[pos] == ':' or data[pos] == ' ' or data[pos] == '"')) : (pos += 1) {}
+    if (pos == 0) return null;
+    pos -= 1; // back to opening quote
+    if (pos >= data.len or data[pos] != '"') return null;
+    pos += 1;
+    const end = std.mem.indexOfScalarPos(u8, data, pos, '"') orelse return null;
+    if (end <= pos) return null;
+    return data[pos..end];
+}
+
+// ---------------------------------------------------------------------------
+// Script: http-docs (extended)
+// ---------------------------------------------------------------------------
+
+fn scriptHttpDocs(ip: u32, port: u16, hs: *HostScripts) void {
+    const fd = openSocket(ip, port) orelse return;
+    defer std.posix.close(fd);
+
+    var ip_buf: [16]u8 = undefined;
+    const ip_str = formatIp(&ip_buf, ip);
+    var req_buf: [160]u8 = undefined;
+    const request = std.fmt.bufPrint(&req_buf, "GET /docs HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{ip_str}) catch return;
+    _ = std.posix.write(fd, request) catch return;
+
+    var buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = std.posix.read(fd, buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    if (total < 15) return;
+
+    const data = buf[0..total];
+    if (!std.mem.startsWith(u8, data, "HTTP/1.")) return;
+    if (!std.mem.eql(u8, data[9..12], "200")) return;
+
+    if (findCaseInsensitive(data, "swagger-ui") != null) {
+        hs.add("http-docs", "Swagger UI");
+    } else if (findCaseInsensitive(data, "redoc") != null) {
+        hs.add("http-docs", "ReDoc");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Script: http-404 (extended) - framework fingerprinting via error page
+// ---------------------------------------------------------------------------
+
+fn scriptHttp404(ip: u32, port: u16, hs: *HostScripts) void {
+    const fd = openSocket(ip, port) orelse return;
+    defer std.posix.close(fd);
+
+    var ip_buf: [16]u8 = undefined;
+    const ip_str = formatIp(&ip_buf, ip);
+    var req_buf: [160]u8 = undefined;
+    const request = std.fmt.bufPrint(&req_buf, "GET /asd404ohmz HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{ip_str}) catch return;
+    _ = std.posix.write(fd, request) catch return;
+
+    var buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = std.posix.read(fd, buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    if (total < 15) return;
+
+    const data = buf[0..total];
+    if (!std.mem.startsWith(u8, data, "HTTP/1.")) return;
+
+    const body_start = if (std.mem.indexOf(u8, data, "\r\n\r\n")) |p| p + 4 else total;
+    const body = if (body_start < total) data[body_start..] else "";
+
+    if (std.mem.indexOf(u8, body, "Cannot GET") != null) {
+        hs.add("http-404", "Express.js");
+    } else if (std.mem.indexOf(u8, body, "{\"detail\":\"Not Found\"}") != null) {
+        hs.add("http-404", "FastAPI");
+    } else if (std.mem.indexOf(u8, body, "Whitelabel Error Page") != null) {
+        hs.add("http-404", "Spring Boot");
+    } else if (findCaseInsensitive(body, "<address>apache") != null) {
+        hs.add("http-404", "Apache");
+    } else if (findCaseInsensitive(body, "nginx") != null and std.mem.indexOf(u8, body, "404") != null) {
+        hs.add("http-404", "nginx");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Script: http-proxy (extended) - reverse proxy detection
+// ---------------------------------------------------------------------------
+
+fn scriptHttpProxy(ip: u32, port: u16, hs: *HostScripts) void {
+    const fd = openSocket(ip, port) orelse return;
+    defer std.posix.close(fd);
+
+    var req_buf: [128]u8 = undefined;
+    const request = std.fmt.bufPrint(&req_buf, "GET / HTTP/1.1\r\nHost: invalid.ohmz.test\r\nConnection: close\r\n\r\n", .{}) catch return;
+    _ = std.posix.write(fd, request) catch return;
+
+    var buf: [2048]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return;
+    if (n < 15) return;
+
+    const data = buf[0..n];
+    if (!std.mem.startsWith(u8, data, "HTTP/1.")) return;
+
+    // A reverse proxy often returns 404/502 with its own headers for invalid Host
+    if (findCaseInsensitive(data, "traefik") != null) {
+        hs.add("http-proxy", "Traefik reverse proxy");
+    } else if (findCaseInsensitive(data, "haproxy") != null) {
+        hs.add("http-proxy", "HAProxy");
+    } else if (findCaseInsensitive(data, "envoy") != null) {
+        hs.add("http-proxy", "Envoy proxy");
+    } else if (findCaseInsensitive(data, "caddy") != null) {
+        hs.add("http-proxy", "Caddy");
+    }
 }
 
 // ---------------------------------------------------------------------------

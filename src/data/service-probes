@@ -1,0 +1,56 @@
+# OhmZ Service Probes v1.0
+# Parsed at compile time via @embedFile - zero runtime cost.
+#
+# Format: name|type|pattern|version_skip
+#   type: p = prefix match, c = contains match
+#   version_skip: N = skip N bytes from match start, extract to CRLF
+#                 -1 = no version extraction
+#
+# Sections:
+#   [null]  - matched against NULL probe response (services that speak first)
+#   [http]  - matched against full HTTP GET response (headers + body)
+#
+# Lines starting with # and empty lines are ignored.
+# Signatures are tried in file order; first match wins.
+
+[null]
+# Standard protocols not covered by classifyBanner
+POP3|p|+OK |4
+IMAP|p|* OK |-1
+VNC|p|RFB |4
+NATS|p|INFO {|-1
+Rsync|p|@RSYNCD: |9
+
+[http]
+# Header-based detection
+Jenkins|c|X-Jenkins:|-1
+Kibana|c|kbn-name|-1
+# Title-based detection - common self-hosted services
+GitLab|c|<title>GitLab|-1
+Grafana|c|<title>Grafana|-1
+Prometheus|c|<title>Prometheus|-1
+Portainer|c|<title>Portainer|-1
+Nextcloud|c|<title>Nextcloud|-1
+Jupyter|c|<title>Jupyter|-1
+pgAdmin|c|<title>pgAdmin|-1
+MinIO|c|<title>MinIO|-1
+Gitea|c|<title>Gitea|-1
+phpMyAdmin|c|<title>phpMyAdmin|-1
+Adminer|c|<title>Adminer|-1
+RabbitMQ|c|<title>RabbitMQ|-1
+Vault|c|<title>Vault|-1
+Consul|c|<title>Consul|-1
+ArgoCD|c|<title>Argo CD|-1
+Harbor|c|<title>Harbor|-1
+Rancher|c|<title>Rancher|-1
+Proxmox|c|<title>Proxmox|-1
+SonarQube|c|<title>SonarQube|-1
+Keycloak|c|<title>Keycloak|-1
+Mattermost|c|<title>Mattermost|-1
+Zabbix|c|<title>Zabbix|-1
+Netdata|c|<title>Netdata|-1
+Graylog|c|<title>Graylog|-1
+Redmine|c|<title>Redmine|-1
+Cockpit|c|<title>Cockpit|-1
+Webmin|c|<title>Webmin|-1
+Pi-hole|c|<title>Pi-hole|-1

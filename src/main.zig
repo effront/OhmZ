@@ -15,7 +15,7 @@ const os_mod = @import("os.zig");
 const traceroute_mod = @import("traceroute.zig");
 const scripts_mod = @import("scripts.zig");
 
-const VERSION = "0.5.2";
+const VERSION = "0.6.0";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -230,7 +230,7 @@ pub fn main() !void {
         const workers: usize = @min(open_ports.len, 16);
         try stderr.print("Script scanning on {d} open ports ({d} workers)...\n", .{ open_ports.len, workers });
         const sr = try allocator.alloc(scripts_mod.HostScripts, open_ports.len);
-        scripts_mod.runAll(open_ports, sr, workers);
+        scripts_mod.runAllEx(open_ports, sr, workers, config.script_scan);
         script_results = sr;
     }
 
@@ -335,8 +335,13 @@ pub fn main() !void {
                 } else serviceName(r.port);
                 if (has_versions) {
                     const ver = banners.?[i].version();
-                    if (ver.len > 0) {
+                    const ext = banners.?[i].extra();
+                    if (ver.len > 0 and ext.len > 0) {
+                        try stderr.print("{s:<9} \x1b[32mopen\x1b[0m    {s:<14} {s} ({s})\n", .{ pstr, svc, ver, ext });
+                    } else if (ver.len > 0) {
                         try stderr.print("{s:<9} \x1b[32mopen\x1b[0m    {s:<14} {s}\n", .{ pstr, svc, ver });
+                    } else if (ext.len > 0) {
+                        try stderr.print("{s:<9} \x1b[32mopen\x1b[0m    {s:<14} ({s})\n", .{ pstr, svc, ext });
                     } else {
                         try stderr.print("{s:<9} \x1b[32mopen\x1b[0m    {s}\n", .{ pstr, svc });
                     }
@@ -381,8 +386,13 @@ pub fn main() !void {
                 } else serviceName(r.port);
                 if (has_versions) {
                     const ver = banners.?[i].version();
-                    if (ver.len > 0) {
+                    const ext = banners.?[i].extra();
+                    if (ver.len > 0 and ext.len > 0) {
+                        try stderr.print("{s:<17} {s:<9} \x1b[32mopen\x1b[0m    {s:<14} {s} ({s})\n", .{ hstr, pstr, svc, ver, ext });
+                    } else if (ver.len > 0) {
                         try stderr.print("{s:<17} {s:<9} \x1b[32mopen\x1b[0m    {s:<14} {s}\n", .{ hstr, pstr, svc, ver });
+                    } else if (ext.len > 0) {
+                        try stderr.print("{s:<17} {s:<9} \x1b[32mopen\x1b[0m    {s:<14} ({s})\n", .{ hstr, pstr, svc, ext });
                     } else {
                         try stderr.print("{s:<17} {s:<9} \x1b[32mopen\x1b[0m    {s}\n", .{ hstr, pstr, svc });
                     }

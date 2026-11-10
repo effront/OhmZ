@@ -15,6 +15,10 @@ pub const TlsInfo = struct {
     issuer_cn_len: u8 = 0,
     not_after_buf: [24]u8 = .{0} ** 24,
     not_after_len: u8 = 0,
+    san_buf: [256]u8 = .{0} ** 256,
+    san_len: u16 = 0,
+    alpn_buf: [16]u8 = .{0} ** 16,
+    alpn_len: u8 = 0,
     tls_minor: u8 = 0,
     valid: bool = false,
 
@@ -38,8 +42,22 @@ pub const TlsInfo = struct {
         return self.not_after_buf[0..self.not_after_len];
     }
 
+    pub fn sans(self: *const TlsInfo) []const u8 {
+        return self.san_buf[0..self.san_len];
+    }
+
+    pub fn alpn(self: *const TlsInfo) []const u8 {
+        return self.alpn_buf[0..self.alpn_len];
+    }
+
     fn setStr(buf: []u8, text: []const u8) u8 {
         const len: u8 = @intCast(@min(text.len, buf.len));
+        @memcpy(buf[0..len], text[0..len]);
+        return len;
+    }
+
+    fn setStr16(buf: []u8, text: []const u8) u16 {
+        const len: u16 = @intCast(@min(text.len, buf.len));
         @memcpy(buf[0..len], text[0..len]);
         return len;
     }
@@ -168,6 +186,15 @@ fn parseServerHello(data: []const u8, info: *TlsInfo) void {
                 actual_major = data[epos];
                 actual_minor = data[epos + 1];
             }
+            if (etype == 0x0010 and elen >= 4) {
+                const proto_start = epos + 2;
+                if (proto_start < ext_end) {
+                    const proto_len: usize = data[proto_start];
+                    if (proto_start + 1 + proto_len <= ext_end) {
+                        info.alpn_len = TlsInfo.setStr(&info.alpn_buf, data[proto_start + 1 .. proto_start + 1 + proto_len]);
+                    }
+                }
+            }
             epos += elen;
         }
     }
@@ -238,6 +265,21 @@ fn parseCertDer(der: []const u8, info: *TlsInfo) void {
     const subject_data_end = derSkip(tbs, pos) orelse return;
     const subject_data = tbs[pos..subject_data_end];
     extractCn(subject_data, &info.subject_cn_buf, &info.cn_len);
+
+    // Skip subjectPublicKeyInfo
+    pos = subject_data_end;
+    pos = derSkip(tbs, pos) orelse return;
+
+    // Look for extensions (context tag [3] EXPLICIT)
+    while (pos < tbs.len) {
+        if (tbs[pos] == 0xA3) {
+            const ext_wrapper = derContent(tbs, pos) orelse break;
+            const ext_seq = derEnter(ext_wrapper, 0x30) orelse break;
+            extractSans(ext_seq, &info.san_buf, &info.san_len);
+            break;
+        }
+        pos = derSkip(tbs, pos) orelse break;
+    }
 }
 
 fn parseValidity(data: []const u8, info: *TlsInfo) void {
@@ -267,6 +309,55 @@ fn parseValidity(data: []const u8, info: *TlsInfo) void {
             content[12], content[13],
         }) catch return;
         info.not_after_len = TlsInfo.setStr(&info.not_after_buf, formatted);
+    }
+}
+
+fn extractSans(extensions: []const u8, san_buf: *[256]u8, san_len: *u16) void {
+    const san_oid = [_]u8{ 0x55, 0x1D, 0x11 }; // 2.5.29.17
+    var pos: usize = 0;
+    while (pos < extensions.len) {
+        if (extensions[pos] != 0x30) {
+            pos = derSkip(extensions, pos) orelse return;
+            continue;
+        }
+        const ext_seq = derSlice(extensions, pos, 0x30) orelse return;
+        pos = derSkip(extensions, pos) orelse return;
+
+        if (ext_seq.len < 2) continue;
+        const oid_data = derContent(ext_seq, 0) orelse continue;
+        if (oid_data.len != san_oid.len or !std.mem.eql(u8, oid_data, &san_oid)) continue;
+
+        // Found SAN extension - get the OCTET STRING value
+        var epos = derSkip(ext_seq, 0) orelse continue;
+        // Skip optional BOOLEAN (critical flag)
+        if (epos < ext_seq.len and ext_seq[epos] == 0x01) {
+            epos = derSkip(ext_seq, epos) orelse continue;
+        }
+        const octet = derSlice(ext_seq, epos, 0x04) orelse continue;
+        const names_seq = derEnter(octet, 0x30) orelse continue;
+
+        var npos: usize = 0;
+        var slen: usize = 0;
+        while (npos < names_seq.len) {
+            const tag = names_seq[npos];
+            const li = derReadLen(names_seq, npos + 1) orelse break;
+            if (li.offset + li.length > names_seq.len) break;
+            const val = names_seq[li.offset .. li.offset + li.length];
+
+            // tag 0x82 = dNSName (context [2] IMPLICIT)
+            if (tag == 0x82 and val.len > 0) {
+                if (slen > 0 and slen + 1 < san_buf.len) {
+                    san_buf[slen] = ',';
+                    slen += 1;
+                }
+                const copy_len = @min(val.len, san_buf.len - slen);
+                @memcpy(san_buf[slen .. slen + copy_len], val[0..copy_len]);
+                slen += copy_len;
+            }
+            npos = li.offset + li.length;
+        }
+        san_len.* = @intCast(@min(slen, san_buf.len));
+        return;
     }
 }
 
@@ -351,10 +442,10 @@ fn readU24(b: []const u8) usize {
     return (@as(usize, b[0]) << 16) | (@as(usize, b[1]) << 8) | @as(usize, b[2]);
 }
 
-const HelloMsg = struct { data: [256]u8, len: usize };
+const HelloMsg = struct { data: [384]u8, len: usize };
 
 fn buildClientHello() HelloMsg {
-    var buf: [256]u8 = .{0} ** 256;
+    var buf: [384]u8 = .{0} ** 384;
     var pos: usize = 0;
 
     buf[pos] = 22;
@@ -385,14 +476,17 @@ fn buildClientHello() HelloMsg {
     pos += 1;
 
     const cipher_suites = [_][2]u8{
+        .{ 0x13, 0x01 }, // TLS_AES_128_GCM_SHA256 (TLS 1.3)
+        .{ 0x13, 0x02 }, // TLS_AES_256_GCM_SHA384 (TLS 1.3)
+        .{ 0x13, 0x03 }, // TLS_CHACHA20_POLY1305_SHA256 (TLS 1.3)
         .{ 0xC0, 0x2F }, // ECDHE_RSA_AES_128_GCM_SHA256
         .{ 0xC0, 0x30 }, // ECDHE_RSA_AES_256_GCM_SHA384
         .{ 0xC0, 0x2B }, // ECDHE_ECDSA_AES_128_GCM_SHA256
         .{ 0xC0, 0x2C }, // ECDHE_ECDSA_AES_256_GCM_SHA384
+        .{ 0xCC, 0xA8 }, // ECDHE_RSA_CHACHA20_POLY1305
+        .{ 0xCC, 0xA9 }, // ECDHE_ECDSA_CHACHA20_POLY1305
         .{ 0x00, 0x9C }, // RSA_AES_128_GCM_SHA256
         .{ 0x00, 0x9D }, // RSA_AES_256_GCM_SHA384
-        .{ 0x00, 0x2F }, // RSA_AES_128_CBC_SHA
-        .{ 0x00, 0x35 }, // RSA_AES_256_CBC_SHA
         .{ 0x00, 0xFF }, // RENEGOTIATION_INFO_SCSV
     };
     const suites_len: u16 = cipher_suites.len * 2;
@@ -468,6 +562,38 @@ fn buildClientHello() HelloMsg {
         pos += 2;
     }
 
+    // Extension: ALPN (0x0010) - advertise h2 and http/1.1
+    buf[pos] = 0x00;
+    buf[pos + 1] = 0x10;
+    pos += 2;
+    std.mem.writeInt(u16, buf[pos..][0..2], 14, .big);
+    pos += 2; // extension data length
+    std.mem.writeInt(u16, buf[pos..][0..2], 12, .big);
+    pos += 2; // protocol list length
+    buf[pos] = 2;
+    pos += 1;
+    @memcpy(buf[pos .. pos + 2], "h2");
+    pos += 2;
+    buf[pos] = 8;
+    pos += 1;
+    @memcpy(buf[pos .. pos + 8], "http/1.1");
+    pos += 8;
+
+    // Extension: supported_versions (0x002B) - offer TLS 1.3 + 1.2
+    buf[pos] = 0x00;
+    buf[pos + 1] = 0x2B;
+    pos += 2;
+    std.mem.writeInt(u16, buf[pos..][0..2], 5, .big);
+    pos += 2; // extension data length
+    buf[pos] = 4;
+    pos += 1; // supported versions list length
+    buf[pos] = 0x03;
+    buf[pos + 1] = 0x04;
+    pos += 2; // TLS 1.3
+    buf[pos] = 0x03;
+    buf[pos + 1] = 0x03;
+    pos += 2; // TLS 1.2
+
     const ext_len: u16 = @intCast(pos - ext_len_pos - 2);
     std.mem.writeInt(u16, buf[ext_len_pos..][0..2], ext_len, .big);
 
@@ -521,4 +647,63 @@ fn cipherSuiteName(suite: u16) []const u8 {
         0x1303 => "TLS-CHACHA20-POLY1305-SHA256",
         else => "unknown",
     };
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "tlsVersionName" {
+    try std.testing.expectEqualStrings("TLS 1.3", tlsVersionName(0x03, 0x04));
+    try std.testing.expectEqualStrings("TLS 1.2", tlsVersionName(0x03, 0x03));
+    try std.testing.expectEqualStrings("TLS 1.0", tlsVersionName(0x03, 0x01));
+    try std.testing.expectEqualStrings("SSL 3.0", tlsVersionName(0x03, 0x00));
+    try std.testing.expectEqualStrings("unknown", tlsVersionName(0x02, 0x00));
+}
+
+test "cipherSuiteName - known suites" {
+    try std.testing.expectEqualStrings("TLS-AES-128-GCM-SHA256", cipherSuiteName(0x1301));
+    try std.testing.expectEqualStrings("ECDHE-RSA-AES128-GCM-SHA256", cipherSuiteName(0xC02F));
+    try std.testing.expectEqualStrings("unknown", cipherSuiteName(0xFFFF));
+}
+
+test "derReadLen - short form" {
+    const data = [_]u8{ 0x30, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05 };
+    const info = derReadLen(&data, 1);
+    try std.testing.expect(info != null);
+    try std.testing.expectEqual(@as(usize, 2), info.?.offset);
+    try std.testing.expectEqual(@as(usize, 5), info.?.length);
+}
+
+test "derReadLen - long form 1 byte" {
+    const data = [_]u8{ 0x30, 0x81, 0x80 } ++ ([_]u8{0} ** 128);
+    const info = derReadLen(&data, 1);
+    try std.testing.expect(info != null);
+    try std.testing.expectEqual(@as(usize, 3), info.?.offset);
+    try std.testing.expectEqual(@as(usize, 128), info.?.length);
+}
+
+test "buildClientHello - valid TLS record" {
+    const hello = buildClientHello();
+    try std.testing.expectEqual(@as(u8, 22), hello.data[0]); // handshake
+    try std.testing.expectEqual(@as(u8, 0x03), hello.data[1]); // major
+    try std.testing.expectEqual(@as(u8, 0x01), hello.data[2]); // minor (compat)
+    try std.testing.expectEqual(@as(u8, 1), hello.data[5]); // ClientHello type
+    try std.testing.expect(hello.len > 100);
+    try std.testing.expect(hello.len < 384);
+}
+
+test "TlsInfo - setStr truncates" {
+    var buf: [8]u8 = .{0} ** 8;
+    const len = TlsInfo.setStr(&buf, "abcdefghijklmnop");
+    try std.testing.expectEqual(@as(u8, 8), len);
+    try std.testing.expectEqualStrings("abcdefgh", buf[0..len]);
+}
+
+test "TlsInfo - defaults" {
+    const info = TlsInfo{};
+    try std.testing.expect(!info.valid);
+    try std.testing.expectEqual(@as(u8, 0), info.version_len);
+    try std.testing.expectEqual(@as(u16, 0), info.san_len);
+    try std.testing.expectEqual(@as(u8, 0), info.alpn_len);
 }

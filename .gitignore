@@ -3,6 +3,9 @@ zig-out/
 .zig-cache/
 zig-cache/
 
+# Dev docs (local only)
+devdocs/
+
 # Scan reports and internal docs (may contain target data)
 docs/reports/
 docs/archive/

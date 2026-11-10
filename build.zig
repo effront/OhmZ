@@ -30,6 +30,11 @@ pub fn build(b: *std.Build) void {
         "src/cookie.zig",
         "src/blackrock.zig",
         "src/throttle.zig",
+        "src/banner.zig",
+        "src/tls.zig",
+        "src/output.zig",
+        "src/ports.zig",
+        "src/sigs.zig",
     };
 
     for (test_modules) |mod| {

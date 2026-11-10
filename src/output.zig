@@ -47,11 +47,16 @@ pub const NormalWriter = struct {
         const w = self.bw.writer();
         var pbuf: [12]u8 = undefined;
         const pstr = std.fmt.bufPrint(&pbuf, "{d}/{s}", .{ rec.port, rec.protocol }) catch "?/tcp";
-        w.print("{s:<9} {s:<7} {s}\n", .{
-            pstr,
-            rec.status,
-            rec.service orelse "unknown",
-        }) catch {};
+        const svc = rec.service orelse "unknown";
+        if (rec.version) |ver| {
+            if (rec.extra) |ext| {
+                w.print("{s:<9} {s:<7} {s:<14} {s} ({s})\n", .{ pstr, rec.status, svc, ver, ext }) catch {};
+            } else {
+                w.print("{s:<9} {s:<7} {s:<14} {s}\n", .{ pstr, rec.status, svc, ver }) catch {};
+            }
+        } else {
+            w.print("{s:<9} {s:<7} {s}\n", .{ pstr, rec.status, svc }) catch {};
+        }
     }
 
     pub fn finish(self: *NormalWriter) void {
@@ -162,11 +167,12 @@ pub const GrepWriter = struct {
             w.writeAll(", ") catch {};
         }
 
-        w.print("{d}/{s}/{s}//{s}///", .{
+        w.print("{d}/{s}/{s}//{s}//{s}/", .{
             rec.port,
             rec.status,
             rec.protocol,
             rec.service orelse "",
+            rec.version orelse "",
         }) catch {};
     }
 
@@ -201,7 +207,7 @@ pub const XmlWriter = struct {
         };
         const w = xw.bw.writer();
         w.writeAll("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n") catch {};
-        w.writeAll("<ohmzscan scanner=\"ohmz\" version=\"0.4.0\">\n") catch {};
+        w.writeAll("<ohmzscan scanner=\"ohmz\" version=\"0.6.0\">\n") catch {};
         return xw;
     }
 
@@ -222,11 +228,24 @@ pub const XmlWriter = struct {
         w.print("      <port protocol=\"{s}\" portid=\"{d}\">\n", .{ rec.protocol, rec.port }) catch {};
         w.print("        <state state=\"{s}\"/>\n", .{rec.status}) catch {};
         if (rec.service) |svc| {
+            w.writeAll("        <service name=\"") catch {};
+            w.writeAll(svc) catch {};
+            w.writeByte('"') catch {};
             if (rec.version) |ver| {
-                w.print("        <service name=\"{s}\" product=\"{s}\"/>\n", .{ svc, ver }) catch {};
-            } else {
-                w.print("        <service name=\"{s}\"/>\n", .{svc}) catch {};
+                w.print(" product=\"{s}\"", .{ver}) catch {};
             }
+            if (rec.extra) |ext| {
+                w.print(" extrainfo=\"{s}\"", .{ext}) catch {};
+            }
+            if (rec.tls) {
+                w.writeAll(" tunnel=\"ssl\"") catch {};
+            }
+            w.writeAll("/>\n") catch {};
+        }
+        if (rec.scripts) |scr| {
+            w.writeAll("        <script output=\"") catch {};
+            w.writeAll(scr) catch {};
+            w.writeAll("\"/>\n") catch {};
         }
         w.writeAll("      </port>\n") catch {};
     }
@@ -281,6 +300,24 @@ pub const NdjsonWriter = struct {
 
         if (rec.service) |svc| {
             w.print(",\"service\":\"{s}\"", .{svc}) catch return;
+        }
+        if (rec.version) |ver| {
+            w.writeAll(",\"version\":\"") catch return;
+            writeJsonEscaped(w, ver);
+            w.writeByte('"') catch return;
+        }
+        if (rec.extra) |ext| {
+            w.writeAll(",\"extra\":\"") catch return;
+            writeJsonEscaped(w, ext);
+            w.writeByte('"') catch return;
+        }
+        if (rec.tls) {
+            w.writeAll(",\"tls\":true") catch return;
+        }
+        if (rec.scripts) |scr| {
+            w.writeAll(",\"scripts\":\"") catch return;
+            writeJsonEscaped(w, scr);
+            w.writeByte('"') catch return;
         }
 
         w.print(",\"rtt_us\":{d},\"timestamp\":{d}}}\n", .{ rec.rtt_us, rec.timestamp }) catch return;
