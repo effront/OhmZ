@@ -217,7 +217,7 @@ ohmz -sT -p 80,443 target.com
 sudo ohmz -F 10.10.10.1
 
 # Full port scan with banner grabbing and all output formats
-sudo ohmz -sS -sV -p 1-65535 -oA results 10.0.0.0/16
+sudo ohmz -sS -sV -p 1-65535 -oA results 10.0.0.0/24
 
 # UDP scan with banner grabbing
 sudo ohmz -sU -sV -p 53,161,123 10.0.0.0/24

@@ -137,13 +137,16 @@ pub const ProgressBar = struct {
             w.writeAll("\x1b[35mETA: --:--\x1b[0m") catch return;
             return;
         }
-        const total_s: u64 = @intFromFloat(@min(secs, 359999.0));
-        const h = total_s / 3600;
+        const total_s: u64 = @intFromFloat(secs);
+        const d = total_s / 86400;
+        const h = (total_s % 86400) / 3600;
         const m = (total_s % 3600) / 60;
         const s = total_s % 60;
 
         w.writeAll("\x1b[35mETA: ") catch return;
-        if (h > 0) {
+        if (d > 0) {
+            w.print("{d}d{d:0>2}h{d:0>2}m", .{ d, h, m }) catch return;
+        } else if (h > 0) {
             w.print("{d}h{d:0>2}m{d:0>2}s", .{ h, m, s }) catch return;
         } else if (m > 0) {
             w.print("{d}m{d:0>2}s", .{ m, s }) catch return;
@@ -155,11 +158,14 @@ pub const ProgressBar = struct {
 
     fn writeDuration(w: anytype, secs: f64) void {
         const total_s: u64 = @intFromFloat(@max(secs, 0));
-        const h = total_s / 3600;
+        const d = total_s / 86400;
+        const h = (total_s % 86400) / 3600;
         const m = (total_s % 3600) / 60;
         const s = total_s % 60;
 
-        if (h > 0) {
+        if (d > 0) {
+            w.print("{d}d{d:0>2}h{d:0>2}m", .{ d, h, m }) catch return;
+        } else if (h > 0) {
             w.print("{d}h{d:0>2}m{d:0>2}s", .{ h, m, s }) catch return;
         } else if (m > 0) {
             w.print("{d}m{d:0>2}s", .{ m, s }) catch return;
