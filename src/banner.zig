@@ -140,14 +140,14 @@ const Protocol = enum { http, ssh, ftp, smtp, mysql, redis, postgresql, tls, gen
 
 fn classifyPort(port: u16) Protocol {
     return switch (port) {
-        80, 8080, 8888, 3000, 5000, 8000, 9090 => .http,
-        443, 8443, 993, 995, 465, 636, 990, 992 => .tls,
+        80, 3000, 5000, 8000, 8080, 8888, 9090 => .http,
+        443, 465, 636, 990, 992, 993, 995, 8443 => .tls,
         22, 2222 => .ssh,
         21 => .ftp,
         25, 587 => .smtp,
         3306, 33060 => .mysql,
-        6379, 6380 => .redis,
-        5432, 5433, 5434 => .postgresql,
+        6379...6399 => .redis,
+        5432...5434 => .postgresql,
         else => .generic,
     };
 }
@@ -174,26 +174,27 @@ fn probeHttp(ip: u32, port: u16) ServiceInfo {
 
     const data = buf[0..n];
 
-    if (std.mem.indexOf(u8, data, "Server: ")) |pos| {
-        const start = pos + 8;
-        const end = std.mem.indexOfPos(u8, data, start, "\r\n") orelse @min(start + 80, n);
-        const server = data[start..end];
+    if (findHeaderValue(data, "server:")) |server| {
+        parseServerHeader(server, &info);
+    }
 
-        if (std.mem.indexOf(u8, server, "/")) |slash| {
-            info.setName(server[0..slash]);
-            if (slash + 1 < server.len) {
-                info.setVersion(server[slash + 1 ..]);
-            }
+    if (findHeaderValue(data, "x-powered-by:")) |val| {
+        info.setExtra(val);
+    }
+
+    if (info.name_len == 0) {
+        if (findHeaderValue(data, "uwebsockets:")) |val| {
+            info.setName("uWebSockets");
+            info.setVersion(val);
         } else {
-            info.setName(server);
+            if (extractTitle(data)) |title| {
+                info.setVersion(title);
+            }
+            info.setName("http");
         }
     }
 
-    if (std.mem.indexOf(u8, data, "X-Powered-By: ")) |pos| {
-        const start = pos + 14;
-        const end = std.mem.indexOfPos(u8, data, start, "\r\n") orelse @min(start + 80, n);
-        info.setExtra(data[start..end]);
-    }
+    fingerprintHttp(data, &info);
 
     return info;
 }
@@ -559,6 +560,11 @@ fn probeGeneric(ip: u32, port: u16) ServiceInfo {
             return info;
         }
 
+        // MySQL greeting: packet starts with protocol version byte 10 (0x0a)
+        if (n >= 5 and buf[3] == 0 and buf[4] == 0x0a) {
+            return probeMysql(ip, port);
+        }
+
         if (line.len > 0) {
             const trimmed = std.mem.trim(u8, line, " \t\r\n");
             if (trimmed.len > 0) {
@@ -568,31 +574,60 @@ fn probeGeneric(ip: u32, port: u16) ServiceInfo {
         }
     }
 
-    var ip_buf: [16]u8 = undefined;
-    const ip_str = formatIp(&ip_buf, ip);
-    var req_buf: [128]u8 = undefined;
-    const request = std.fmt.bufPrint(&req_buf, "GET / HTTP/1.0\r\nHost: {s}\r\n\r\n", .{ip_str}) catch return info;
-    _ = std.posix.write(fd, request) catch return info;
+    // Try HTTP first (most common on unknown ports)
+    {
+        var ip_buf: [16]u8 = undefined;
+        const ip_str = formatIp(&ip_buf, ip);
+        var req_buf: [128]u8 = undefined;
+        const request = std.fmt.bufPrint(&req_buf, "GET / HTTP/1.0\r\nHost: {s}\r\n\r\n", .{ip_str}) catch return info;
+        _ = std.posix.write(fd, request) catch return info;
 
-    const hn = std.posix.read(fd, &buf) catch return info;
-    if (hn == 0) return info;
+        const hn = std.posix.read(fd, &buf) catch return info;
+        if (hn > 0) {
+            const data = buf[0..hn];
+            if (std.mem.startsWith(u8, data, "HTTP/")) {
+                if (findHeaderValue(data, "server:")) |server| {
+                    parseServerHeader(server, &info);
+                }
+                if (info.name_len == 0) {
+                    if (findHeaderValue(data, "uwebsockets:")) |val| {
+                        info.setName("uWebSockets");
+                        info.setVersion(val);
+                    } else {
+                        if (extractTitle(data)) |title| {
+                            info.setVersion(title);
+                        }
+                        info.setName("http");
+                    }
+                }
+                if (findHeaderValue(data, "x-powered-by:")) |val| {
+                    info.setExtra(val);
+                }
+                fingerprintHttp(data, &info);
+                return info;
+            }
 
-    const data = buf[0..hn];
-    if (!std.mem.startsWith(u8, data, "HTTP/")) return info;
-
-    if (std.mem.indexOf(u8, data, "Server: ")) |pos| {
-        const start = pos + 8;
-        const end = std.mem.indexOfPos(u8, data, start, "\r\n") orelse @min(start + 80, hn);
-        const server = data[start..end];
-        if (std.mem.indexOf(u8, server, "/")) |slash| {
-            info.setName(server[0..slash]);
-            if (slash + 1 < server.len) info.setVersion(server[slash + 1 ..]);
-        } else {
-            info.setName(server);
+            // Response to HTTP wasn't HTTP - check for Redis RESP error
+            if (std.mem.startsWith(u8, data, "-ERR") or
+                std.mem.startsWith(u8, data, "-NOAUTH") or
+                std.mem.startsWith(u8, data, "-DENIED"))
+            {
+                info.setName("Redis");
+                if (std.mem.indexOf(u8, data, "NOAUTH")) |_| {
+                    info.setExtra("auth required");
+                }
+                return info;
+            }
         }
-    } else {
-        info.setName("HTTP");
     }
+
+    // Try Redis on a new connection
+    const redis_info = probeRedis(ip, port);
+    if (!redis_info.empty()) return redis_info;
+
+    // Try PostgreSQL on a new connection
+    const pg_info = probePostgresql(ip, port);
+    if (!pg_info.empty()) return pg_info;
 
     return info;
 }
@@ -665,6 +700,96 @@ fn setTimeout(fd: std.posix.fd_t) void {
     const bytes = std.mem.asBytes(&tv);
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, SO_RCVTIMEO, bytes) catch {};
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, SO_SNDTIMEO, bytes) catch {};
+}
+
+fn findHeaderValue(data: []const u8, header: []const u8) ?[]const u8 {
+    // Only match at start of a header line (pos == 0 or preceded by \n)
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const pos = findCaseTag(data[offset..], header) orelse return null;
+        const abs_pos = offset + pos;
+        if (abs_pos == 0 or data[abs_pos - 1] == '\n') {
+            var start = abs_pos + header.len;
+            while (start < data.len and (data[start] == ' ' or data[start] == '\t')) start += 1;
+            if (start >= data.len) return null;
+            const end = std.mem.indexOfPos(u8, data, start, "\r\n") orelse @min(start + 128, data.len);
+            if (start >= end) return null;
+            return data[start..end];
+        }
+        offset = abs_pos + 1;
+    }
+    return null;
+}
+
+fn parseServerHeader(server: []const u8, info: *ServiceInfo) void {
+    if (std.mem.indexOf(u8, server, "/")) |slash| {
+        info.setName(server[0..slash]);
+        if (slash + 1 < server.len) info.setVersion(server[slash + 1 ..]);
+    } else {
+        info.setName(server);
+    }
+}
+
+fn fingerprintHttp(data: []const u8, info: *ServiceInfo) void {
+    const body_start = if (std.mem.indexOf(u8, data, "\r\n\r\n")) |pos| pos + 4 else data.len;
+    const body = if (body_start < data.len) data[body_start..] else "";
+
+    // uvicorn + {"detail":...} -> FastAPI
+    if (info.name_len > 0 and std.mem.eql(u8, info.name(), "uvicorn")) {
+        if (std.mem.indexOf(u8, body, "{\"detail\":")) |_| {
+            info.setExtra("FastAPI");
+        }
+        return;
+    }
+
+    if (info.name_len == 0 or std.mem.eql(u8, info.name(), "http")) {
+        // Go net/http: body "404 page not found" + X-Content-Type-Options: nosniff
+        if (findHeaderValue(data, "x-content-type-options:")) |val| {
+            if (findCaseTag(val, "nosniff") != null and std.mem.indexOf(u8, body, "404 page not found") != null) {
+                info.setName("Go net/http");
+                return;
+            }
+        }
+
+        // Node.js http: Keep-Alive: timeout=N + Transfer-Encoding: chunked + no Server
+        if (findHeaderValue(data, "keep-alive:")) |ka| {
+            if (std.mem.startsWith(u8, ka, "timeout=") and findHeaderValue(data, "transfer-encoding:") != null) {
+                info.setName("Node.js http");
+                return;
+            }
+        }
+    }
+}
+
+fn extractTitle(data: []const u8) ?[]const u8 {
+    const open = findCaseTag(data, "<title>") orelse return null;
+    const after = open + 7;
+    if (after >= data.len) return null;
+    const close = findCaseTag(data[after..], "</title>") orelse return null;
+    const raw = data[after .. after + close];
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return trimmed;
+}
+
+fn findCaseTag(haystack: []const u8, needle: []const u8) ?usize {
+    if (needle.len > haystack.len) return null;
+    const end = haystack.len - needle.len + 1;
+    var i: usize = 0;
+    while (i < end) : (i += 1) {
+        var matched = true;
+        for (needle, 0..) |nc, j| {
+            const hc = haystack[i + j];
+            const lower_h = if (hc >= 'A' and hc <= 'Z') hc + 32 else hc;
+            const lower_n = if (nc >= 'A' and nc <= 'Z') nc + 32 else nc;
+            if (lower_h != lower_n) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return i;
+    }
+    return null;
 }
 
 fn extractVersionNumber(text: []const u8, info: *ServiceInfo) void {
