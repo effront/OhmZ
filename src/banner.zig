@@ -607,8 +607,11 @@ fn probeGeneric(ip: u32, port: u16) ServiceInfo {
                 return info;
             }
 
-            // Response to HTTP wasn't HTTP - check if it looks like Redis error
-            if (data[0] == '-') {
+            // Response to HTTP wasn't HTTP - check for Redis RESP error
+            if (std.mem.startsWith(u8, data, "-ERR") or
+                std.mem.startsWith(u8, data, "-NOAUTH") or
+                std.mem.startsWith(u8, data, "-DENIED"))
+            {
                 info.setName("Redis");
                 if (std.mem.indexOf(u8, data, "NOAUTH")) |_| {
                     info.setExtra("auth required");
@@ -700,13 +703,22 @@ fn setTimeout(fd: std.posix.fd_t) void {
 }
 
 fn findHeaderValue(data: []const u8, header: []const u8) ?[]const u8 {
-    const pos = findCaseTag(data, header) orelse return null;
-    var start = pos + header.len;
-    while (start < data.len and (data[start] == ' ' or data[start] == '\t')) start += 1;
-    if (start >= data.len) return null;
-    const end = std.mem.indexOfPos(u8, data, start, "\r\n") orelse @min(start + 128, data.len);
-    if (start >= end) return null;
-    return data[start..end];
+    // Only match at start of a header line (pos == 0 or preceded by \n)
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const pos = findCaseTag(data[offset..], header) orelse return null;
+        const abs_pos = offset + pos;
+        if (abs_pos == 0 or data[abs_pos - 1] == '\n') {
+            var start = abs_pos + header.len;
+            while (start < data.len and (data[start] == ' ' or data[start] == '\t')) start += 1;
+            if (start >= data.len) return null;
+            const end = std.mem.indexOfPos(u8, data, start, "\r\n") orelse @min(start + 128, data.len);
+            if (start >= end) return null;
+            return data[start..end];
+        }
+        offset = abs_pos + 1;
+    }
+    return null;
 }
 
 fn parseServerHeader(server: []const u8, info: *ServiceInfo) void {
