@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
         "src/output.zig",
         "src/ports.zig",
         "src/sigs.zig",
+        "src/scripts.zig",
     };
 
     for (test_modules) |mod| {

@@ -55,7 +55,7 @@ fn matchAgainst(data: []const u8, sigs: []const Sig) ?Match {
 // ---------------------------------------------------------------------------
 
 fn countSigs(comptime cat: Category) comptime_int {
-    @setEvalBranchQuota(4000);
+    @setEvalBranchQuota(20000);
     var section: Category = .none;
     var count: usize = 0;
     var iter = std.mem.splitScalar(u8, probes_raw, '\n');
@@ -141,11 +141,11 @@ fn parseI8(comptime s: []const u8) i8 {
 // ---------------------------------------------------------------------------
 
 test "null probe signature count" {
-    try std.testing.expect(null_sigs.len == 5);
+    try std.testing.expect(null_sigs.len == 9);
 }
 
 test "http signature count" {
-    try std.testing.expect(http_sigs.len >= 30);
+    try std.testing.expect(http_sigs.len >= 70);
 }
 
 test "matchBanner - POP3" {
@@ -213,4 +213,57 @@ test "matchHttp - Kibana header" {
 test "matchHttp - no match" {
     const resp = "HTTP/1.1 200 OK\r\n\r\n<html><head><title>My App</title></head></html>";
     try std.testing.expect(matchHttp(resp) == null);
+}
+
+test "matchBanner - CouchDB" {
+    const m = matchBanner("{\"couchdb\":\"Welcome\",\"version\":\"3.3.2\"}\n") orelse return error.TestExpectedMatch;
+    try std.testing.expectEqualStrings("CouchDB", m.name);
+    try std.testing.expectEqualStrings("", m.version);
+}
+
+test "matchBanner - Asterisk" {
+    const m = matchBanner("Asterisk Call Manager/6.0.1\r\n") orelse return error.TestExpectedMatch;
+    try std.testing.expectEqualStrings("Asterisk", m.name);
+    try std.testing.expectEqualStrings("6.0.1", m.version);
+}
+
+test "matchBanner - TeamSpeak" {
+    const m = matchBanner("TS3\r\n") orelse return error.TestExpectedMatch;
+    try std.testing.expectEqualStrings("TeamSpeak", m.name);
+    try std.testing.expectEqualStrings("", m.version);
+}
+
+test "matchBanner - RethinkDB" {
+    const m = matchBanner("{\"success\":true,\"server\":\"RethinkDB\"}\n") orelse return error.TestExpectedMatch;
+    try std.testing.expectEqualStrings("RethinkDB", m.name);
+}
+
+test "matchHttp - Tomcat" {
+    const resp = "HTTP/1.1 200 OK\r\n\r\n<html><head><title>Apache Tomcat/10.1.7</title></head></html>";
+    const m = matchHttp(resp) orelse return error.TestExpectedMatch;
+    try std.testing.expectEqualStrings("Tomcat", m.name);
+}
+
+test "matchHttp - Docker Registry header" {
+    const resp = "HTTP/1.1 200 OK\r\nDocker-Distribution-Api-Version: registry/2.0\r\n\r\n{}";
+    const m = matchHttp(resp) orelse return error.TestExpectedMatch;
+    try std.testing.expectEqualStrings("Docker Registry", m.name);
+}
+
+test "matchHttp - Spring Boot header" {
+    const resp = "HTTP/1.1 200 OK\r\nX-Application-Context: myapp\r\n\r\n<html></html>";
+    const m = matchHttp(resp) orelse return error.TestExpectedMatch;
+    try std.testing.expectEqualStrings("Spring Boot", m.name);
+}
+
+test "matchHttp - Werkzeug header" {
+    const resp = "HTTP/1.1 200 OK\r\nServer: Werkzeug/2.3.7 Python/3.11.4\r\n\r\n<html></html>";
+    const m = matchHttp(resp) orelse return error.TestExpectedMatch;
+    try std.testing.expectEqualStrings("Werkzeug", m.name);
+}
+
+test "matchHttp - Uptime Kuma title" {
+    const resp = "HTTP/1.1 200 OK\r\n\r\n<html><head><title>Uptime Kuma</title></head></html>";
+    const m = matchHttp(resp) orelse return error.TestExpectedMatch;
+    try std.testing.expectEqualStrings("Uptime Kuma", m.name);
 }
