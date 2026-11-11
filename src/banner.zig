@@ -80,6 +80,13 @@ pub fn detect(ip: u32, port: u16) ServiceInfo {
         .amqp => probeAmqp(ip, port),
         .rdp => probeRdp(ip, port),
         .smb => probeSmb(ip, port),
+        .dns => probeDns(ip, port),
+        .kerberos => probeKerberos(ip, port),
+        .msrpc => probeMsrpc(ip, port),
+        .netbios => probeNetbios(ip, port),
+        .ldap => probeLdap(ip, port),
+        .xmpp => probeXmpp(ip, port),
+        .socks => probeSocks(ip, port),
         .generic => probeGeneric(ip, port),
     };
 }
@@ -158,13 +165,20 @@ const Protocol = enum {
     amqp,
     rdp,
     smb,
+    dns,
+    kerberos,
+    msrpc,
+    netbios,
+    ldap,
+    xmpp,
+    socks,
     generic,
 };
 
 fn classifyPort(port: u16) Protocol {
     return switch (port) {
-        80, 3000, 5000, 8000, 8080, 8888, 9090 => .http,
-        443, 465, 636, 990, 992, 993, 995, 8443 => .tls,
+        80, 3000, 5000, 7070, 8000, 8080, 8888, 9090 => .http,
+        443, 465, 636, 990, 992, 993, 995, 3269, 7443, 8443, 9091 => .tls,
         22, 2222 => .ssh,
         21 => .ftp,
         25, 587 => .smtp,
@@ -177,6 +191,13 @@ fn classifyPort(port: u16) Protocol {
         5672 => .amqp,
         3389 => .rdp,
         445 => .smb,
+        53 => .dns,
+        88, 464 => .kerberos,
+        135, 593 => .msrpc,
+        139 => .netbios,
+        389, 3268 => .ldap,
+        5222, 5269 => .xmpp,
+        1080, 7777 => .socks,
         else => .generic,
     };
 }
@@ -618,6 +639,12 @@ fn probeTls(ip: u32, port: u16) ServiceInfo {
         info.setVersion(ver);
     }
 
+    // Label the underlying protocol based on ALPN or well-known TLS port
+    const underlying = guessUnderlyingService(port, alpn_str);
+    if (underlying.len > 0) {
+        info.setName(underlying);
+    }
+
     return info;
 }
 
@@ -906,6 +933,484 @@ fn probeSmb(ip: u32, port: u16) ServiceInfo {
     return info;
 }
 
+fn probeDns(ip: u32, port: u16) ServiceInfo {
+    var info = ServiceInfo{};
+    const fd = openSocket(ip, port) orelse return info;
+    defer std.posix.close(fd);
+
+    // DNS version.bind TXT CH query over TCP (2-byte length prefix + DNS packet)
+    const dns_payload = [_]u8{
+        // DNS header
+        0x13, 0x37, // Transaction ID
+        0x00, 0x00, // Flags: standard query
+        0x00, 0x01, // Questions: 1
+        0x00, 0x00, // Answer RRs
+        0x00, 0x00, // Authority RRs
+        0x00, 0x00, // Additional RRs
+        // Question: version.bind CH TXT
+        0x07, 'v',
+        'e',  'r',
+        's',  'i',
+        'o',  'n',
+        0x04, 'b',
+        'i',  'n',
+        'd',
+        0x00, // root label
+        0x00, 0x10, // Type: TXT
+        0x00, 0x03, // Class: CH
+    };
+    const tcp_len: u16 = dns_payload.len;
+    const dns_query = [2]u8{ @intCast(tcp_len >> 8), @intCast(tcp_len & 0xFF) } ++ dns_payload;
+    _ = std.posix.write(fd, &dns_query) catch return info;
+
+    var buf: [512]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return info;
+    // TCP DNS response: 2-byte length prefix + DNS message
+    if (n < 14) return info;
+
+    // Skip 2-byte TCP length prefix
+    const dns_data = buf[2..n];
+    if (dns_data.len < 12) return info;
+
+    // Check transaction ID matches
+    if (dns_data[0] != 0x13 or dns_data[1] != 0x37) return info;
+
+    // Check QR bit (response flag)
+    const flags = (@as(u16, dns_data[2]) << 8) | @as(u16, dns_data[3]);
+    if ((flags & 0x8000) == 0) return info;
+
+    info.setName("DNS");
+
+    // Check answer count
+    const ancount = (@as(u16, dns_data[6]) << 8) | @as(u16, dns_data[7]);
+    if (ancount == 0) return info;
+
+    // Skip question section to find answers (starts at offset 12)
+    var pos: usize = 12;
+    while (pos < dns_data.len) {
+        const label_len = dns_data[pos];
+        if (label_len == 0) {
+            pos += 1;
+            break;
+        }
+        if ((label_len & 0xC0) == 0xC0) {
+            pos += 2;
+            break;
+        }
+        pos += 1 + @as(usize, label_len);
+    }
+    pos += 4; // skip QTYPE and QCLASS
+
+    // Parse first answer - skip name (may be compressed pointer)
+    if (pos >= dns_data.len) return info;
+    if ((dns_data[pos] & 0xC0) == 0xC0) {
+        pos += 2;
+    } else {
+        while (pos < dns_data.len) {
+            const label_len = dns_data[pos];
+            if (label_len == 0) {
+                pos += 1;
+                break;
+            }
+            pos += 1 + @as(usize, label_len);
+        }
+    }
+
+    if (pos + 10 > dns_data.len) return info;
+    // TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2)
+    const rtype = (@as(u16, dns_data[pos]) << 8) | @as(u16, dns_data[pos + 1]);
+    pos += 8; // skip TYPE, CLASS, TTL
+    const rdlen = (@as(u16, dns_data[pos]) << 8) | @as(u16, dns_data[pos + 1]);
+    pos += 2;
+
+    if (rtype == 0x0010 and rdlen > 1 and pos + @as(usize, rdlen) <= dns_data.len) {
+        // TXT record: first byte is text length
+        const txt_len = dns_data[pos];
+        if (txt_len > 0 and pos + 1 + @as(usize, txt_len) <= dns_data.len) {
+            const txt = dns_data[pos + 1 .. pos + 1 + @as(usize, txt_len)];
+            info.setVersion(txt);
+        }
+    }
+
+    return info;
+}
+
+fn probeKerberos(ip: u32, port: u16) ServiceInfo {
+    var info = ServiceInfo{};
+    const fd = openSocket(ip, port) orelse return info;
+    defer std.posix.close(fd);
+
+    // Minimal Kerberos AS-REQ with dummy realm "X"
+    const as_req = [_]u8{
+        // TCP length prefix (4 bytes big-endian)
+        0x00, 0x00, 0x00, 0x49, // 73 bytes
+        // APPLICATION[10] (AS-REQ)
+        0x6A, 0x47, 0x30, 0x45,
+        // pvno: INTEGER 5
+        0xA1, 0x03, 0x02, 0x01,
+        0x05,
+        // msg-type: INTEGER 10 (AS-REQ)
+        0xA2, 0x03, 0x02,
+        0x01, 0x0A,
+        // req-body: context[4] SEQUENCE
+        0xA4, 0x39,
+        0x30, 0x37,
+        // kdc-options: BIT STRING (all zero)
+        0xA0, 0x07,
+        0x03, 0x05, 0x00, 0x00,
+        0x00, 0x00, 0x00,
+        // cname: name-type=1, name-string={""}
+        0xA1,
+        0x0D, 0x30, 0x0B, 0xA0,
+        0x03, 0x02, 0x01, 0x01,
+        0xA1, 0x04, 0x30, 0x02,
+        0x1B, 0x00,
+        // realm: GeneralString "X"
+        0xA2, 0x03,
+        0x1B, 0x01, 0x58,
+        // till: GeneralizedTime "20370101000000Z"
+        0xA5,
+        0x11, 0x18, 0x0F, 0x32,
+        0x30, 0x33, 0x37, 0x30,
+        0x31, 0x30, 0x31, 0x30,
+        0x30, 0x30, 0x30, 0x30,
+        0x30, 0x5A,
+        // etype: SEQUENCE { 18 (aes256-cts) }
+        0xA8, 0x05,
+        0x30, 0x03, 0x02, 0x01,
+        0x12,
+    };
+    _ = std.posix.write(fd, &as_req) catch return info;
+
+    var buf: [512]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return info;
+    if (n < 5) return info;
+
+    // Response: 4-byte TCP length prefix + Kerberos message
+    // APPLICATION[30] (KRB_ERROR) = 0x7E, APPLICATION[11] (AS_REP) = 0x6B
+    if (buf[4] == 0x7E or buf[4] == 0x6B) {
+        info.setName("Kerberos");
+        // Try to extract realm from KRB_ERROR response
+        if (buf[4] == 0x7E and n > 20) {
+            extractKerberosRealm(buf[4..n], &info);
+        }
+    }
+
+    return info;
+}
+
+fn extractKerberosRealm(data: []const u8, info: *ServiceInfo) void {
+    // Scan for GeneralString tags (0x1B) with plausible realm content
+    var i: usize = 0;
+    while (i + 2 < data.len) {
+        if (data[i] == 0x1B) {
+            const str_len = data[i + 1];
+            if (str_len > 1 and str_len < 64 and i + 2 + @as(usize, str_len) <= data.len) {
+                const candidate = data[i + 2 .. i + 2 + @as(usize, str_len)];
+                if (isLikelyRealm(candidate)) {
+                    info.setExtra(candidate);
+                    return;
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+fn isLikelyRealm(s: []const u8) bool {
+    if (s.len == 0) return false;
+    var has_upper = false;
+    for (s) |c| {
+        if (c >= 'A' and c <= 'Z') {
+            has_upper = true;
+        } else if (c == '.' or c == '-') {
+            // domain-style separators OK
+        } else if (c >= 'a' and c <= 'z') {
+            // lowercase OK
+        } else if (c >= '0' and c <= '9') {
+            // digits OK
+        } else {
+            return false;
+        }
+    }
+    return has_upper;
+}
+
+fn probeMsrpc(ip: u32, port: u16) ServiceInfo {
+    var info = ServiceInfo{};
+    const fd = openSocket(ip, port) orelse return info;
+    defer std.posix.close(fd);
+
+    // DCE/RPC Bind to endpoint mapper (72 bytes)
+    const rpc_bind = [_]u8{
+        0x05, 0x00, // version 5.0
+        0x0B, // packet type: bind
+        0x03, // flags: first+last frag
+        0x10, 0x00, 0x00, 0x00, // data representation (little-endian, ASCII, IEEE)
+        0x48, 0x00, // frag length (72)
+        0x00, 0x00, // auth length
+        0x01, 0x00, 0x00, 0x00, // call ID
+        0xD8, 0x10, // max xmit frag
+        0xD8, 0x10, // max recv frag
+        0x00, 0x00, 0x00, 0x00, // assoc group
+        0x01, 0x00, 0x00, 0x00, // num ctx items = 1
+        0x00, 0x00, // context ID
+        0x01, 0x00, // num transfer syntaxes
+        // Abstract syntax: EPM (e1af8308-5d1f-11c9-91a4-08002b14a0fa v3.0)
+        0x08, 0x83,
+        0xAF, 0xE1,
+        0x1F, 0x5D,
+        0xC9, 0x11,
+        0x91, 0xA4,
+        0x08, 0x00,
+        0x2B, 0x14,
+        0xA0, 0xFA,
+        0x03, 0x00,
+        0x00, 0x00,
+        // Transfer syntax: NDR (8a885d04-1ceb-11c9-9fe8-08002b104860 v2.0)
+        0x04, 0x5D,
+        0x88, 0x8A,
+        0xEB, 0x1C,
+        0xC9, 0x11,
+        0x9F, 0xE8,
+        0x08, 0x00,
+        0x2B, 0x10,
+        0x48, 0x60,
+        0x02, 0x00,
+        0x00, 0x00,
+    };
+    _ = std.posix.write(fd, &rpc_bind) catch return info;
+
+    var buf: [256]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return info;
+    if (n < 3) return info;
+
+    // Check: DCE/RPC version 5, packet type 0x0C (bind_ack)
+    if (buf[0] == 0x05 and buf[2] == 0x0C) {
+        info.setName("MSRPC");
+        info.setExtra("Microsoft Windows RPC");
+    }
+
+    return info;
+}
+
+fn probeNetbios(ip: u32, port: u16) ServiceInfo {
+    var info = ServiceInfo{};
+    const fd = openSocket(ip, port) orelse return info;
+    defer std.posix.close(fd);
+
+    // NetBIOS Session Request
+    // Called name: *SMBSERVER (encoded), Calling name: spaces (encoded)
+    const nbss = [_]u8{
+        0x81, // session request type
+        0x00, // flags
+        0x00, 0x44, // length = 68 (called 34 + calling 34)
+        // Called name: *SMBSERVER padded with spaces, first-level encoded
+        0x20, // name length (32 encoded bytes follow)
+        0x43, 0x4B, // * (0x2A)
+        0x46, 0x44, // S (0x53)
+        0x45, 0x4E, // M (0x4D)
+        0x45, 0x43, // B (0x42)
+        0x46, 0x44, // S (0x53)
+        0x45, 0x46, // E (0x45)
+        0x46, 0x43, // R (0x52)
+        0x46, 0x47, // V (0x56)
+        0x45, 0x46, // E (0x45)
+        0x46, 0x43, // R (0x52)
+        0x43, 0x41, // SP (0x20)
+        0x43, 0x41, // SP
+        0x43, 0x41, // SP
+        0x43, 0x41, // SP
+        0x43, 0x41, // SP
+        0x43, 0x41, // SP
+        0x00, // scope (null)
+        // Calling name: all spaces, first-level encoded
+        0x20, // name length
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x43,
+        0x41,
+        0x00, // scope (null)
+    };
+    _ = std.posix.write(fd, &nbss) catch return info;
+
+    var buf: [64]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return info;
+    if (n < 1) return info;
+
+    if (buf[0] == 0x82) {
+        info.setName("NetBIOS-SSN");
+        info.setExtra("session established");
+    } else if (buf[0] == 0x83) {
+        info.setName("NetBIOS-SSN");
+        info.setExtra("session refused");
+    }
+
+    return info;
+}
+
+fn probeLdap(ip: u32, port: u16) ServiceInfo {
+    var info = ServiceInfo{};
+    const fd = openSocket(ip, port) orelse return info;
+    defer std.posix.close(fd);
+
+    // LDAP SearchRequest for rootDSE (anonymous bind, base scope, objectClass=*)
+    const ldap_search = [_]u8{
+        0x30, 0x25, // SEQUENCE len=37
+        0x02, 0x01, 0x01, // MessageID = 1
+        0x63, 0x20, // APPLICATION[3] SearchRequest len=32
+        0x04, 0x00, // baseObject = ""
+        0x0A, 0x01, 0x00, // scope = base
+        0x0A, 0x01, 0x00, // derefAliases = never
+        0x02, 0x01, 0x00, // sizeLimit = 0
+        0x02, 0x01, 0x00, // timeLimit = 0
+        0x01, 0x01, 0x00, // typesOnly = false
+        0x87, 0x0B, // CONTEXT[7] present filter len=11
+        'o',  'b',
+        'j',  'e',
+        'c',  't',
+        'C',  'l',
+        'a',  's',
+        's',
+        0x30, 0x00, // empty attribute list (return all)
+    };
+    _ = std.posix.write(fd, &ldap_search) catch return info;
+
+    var buf: [2048]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return info;
+    if (n < 6) return info;
+
+    const data = buf[0..n];
+    // Valid LDAP response starts with SEQUENCE (0x30)
+    if (data[0] != 0x30) return info;
+
+    // Parse BER SEQUENCE: skip tag, then length
+    var pos: usize = 1;
+    if (pos >= n) return info;
+    if ((data[pos] & 0x80) != 0) {
+        pos += 1 + @as(usize, data[pos] & 0x7F);
+    } else {
+        pos += 1;
+    }
+    // Skip messageID (tag 0x02 + length byte + value bytes)
+    if (pos + 2 >= n or data[pos] != 0x02) return info;
+    pos += 2 + @as(usize, data[pos + 1]);
+
+    if (pos >= n) return info;
+
+    // Check for LDAP response APPLICATION tags
+    // 0x61=BindResponse, 0x64=SearchResultEntry, 0x65=SearchResultDone
+    if (data[pos] != 0x64 and data[pos] != 0x65 and data[pos] != 0x61) return info;
+
+    info.setName("LDAP");
+
+    // Scan for domain components (DC=...) in the response
+    var dc_start = std.mem.indexOf(u8, data, "DC=");
+    if (dc_start == null) dc_start = std.mem.indexOf(u8, data, "dc=");
+    if (dc_start) |dpos| {
+        var end = dpos;
+        while (end < data.len and data[end] >= 0x20 and data[end] < 0x7F) {
+            end += 1;
+        }
+        if (end > dpos) {
+            info.setExtra(data[dpos..end]);
+        }
+    }
+
+    return info;
+}
+
+fn probeXmpp(ip: u32, port: u16) ServiceInfo {
+    var info = ServiceInfo{};
+    const fd = openSocket(ip, port) orelse return info;
+    defer std.posix.close(fd);
+
+    // XMPP stream header (use server namespace for port 5269)
+    const xmlns: []const u8 = if (port == 5269) "jabber:server" else "jabber:client";
+    var req_buf: [256]u8 = undefined;
+    const request = std.fmt.bufPrint(&req_buf, "<?xml version='1.0'?><stream:stream xmlns='{s}' xmlns:stream='http://etherx.jabber.org/streams' to='unknown' version='1.0'>", .{xmlns}) catch return info;
+    _ = std.posix.write(fd, request) catch return info;
+
+    var buf: [2048]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return info;
+    if (n < 10) return info;
+
+    const data = buf[0..n];
+
+    if (std.mem.indexOf(u8, data, "<stream:stream") != null or
+        std.mem.indexOf(u8, data, "<stream:features") != null)
+    {
+        if (std.mem.indexOf(u8, data, "jabber") != null) {
+            info.setName("XMPP/Jabber");
+        } else {
+            info.setName("XMPP");
+        }
+    }
+
+    return info;
+}
+
+fn probeSocks(ip: u32, port: u16) ServiceInfo {
+    var info = ServiceInfo{};
+    const fd = openSocket(ip, port) orelse return info;
+    defer std.posix.close(fd);
+
+    // SOCKS5 handshake: version 5, 1 auth method (no-auth)
+    const socks5_hello = [_]u8{
+        0x05, // SOCKS version 5
+        0x01, // 1 auth method
+        0x00, // no authentication
+    };
+    _ = std.posix.write(fd, &socks5_hello) catch return info;
+
+    var buf: [16]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return info;
+    if (n < 2) return info;
+
+    if (buf[0] == 0x05) {
+        info.setName("SOCKS5");
+        const method_desc: []const u8 = switch (buf[1]) {
+            0x00 => "no-auth",
+            0x02 => "user/pass required",
+            0xFF => "no acceptable methods",
+            else => "auth-required",
+        };
+        info.setExtra(method_desc);
+    } else if (buf[0] == 0x04) {
+        info.setName("SOCKS4");
+    }
+
+    return info;
+}
+
 fn probeGeneric(ip: u32, port: u16) ServiceInfo {
     // Phase 1: NULL probe - wait for service to speak first
     {
@@ -942,6 +1447,18 @@ fn probeGeneric(ip: u32, port: u16) ServiceInfo {
     {
         const pg_info = probePostgresql(ip, port);
         if (!pg_info.empty()) return pg_info;
+    }
+    {
+        const socks_info = probeSocks(ip, port);
+        if (!socks_info.empty()) return socks_info;
+    }
+    {
+        const dns_info = probeDns(ip, port);
+        if (!dns_info.empty()) return dns_info;
+    }
+    {
+        const ldap_info = probeLdap(ip, port);
+        if (!ldap_info.empty()) return ldap_info;
     }
 
     return ServiceInfo{};
@@ -1093,9 +1610,16 @@ fn isKnownNonHttpPort(port: u16) bool {
         22, 2222 => true,
         21 => true,
         25, 587 => true,
+        53 => true,
+        88, 464 => true,
         110 => true,
+        135, 593 => true,
+        139 => true,
         143 => true,
+        389, 3268 => true,
+        1080, 7777 => true,
         3306, 33060 => true,
+        5222, 5269 => true,
         5432...5434 => true,
         6379...6399 => true,
         6660...6669, 6697 => true,
@@ -1313,6 +1837,22 @@ fn extractVersionNumber(text: []const u8, info: *ServiceInfo) void {
 
 fn isDigit(c: u8) bool {
     return c >= '0' and c <= '9';
+}
+
+fn guessUnderlyingService(port: u16, alpn_str: []const u8) []const u8 {
+    if (alpn_str.len > 0) {
+        if (std.mem.eql(u8, alpn_str, "h2") or std.mem.eql(u8, alpn_str, "http/1.1")) return "https";
+    }
+    return switch (port) {
+        443, 8443, 7443, 9091 => "https",
+        636, 3269 => "ldaps",
+        993 => "imaps",
+        995 => "pop3s",
+        990 => "ftps",
+        465 => "smtps",
+        992 => "telnets",
+        else => "",
+    };
 }
 
 fn formatIp(buf: []u8, ip: u32) []const u8 {
@@ -1617,4 +2157,86 @@ test "findBsonString - basic" {
     const result = findBsonString(&bson, "version");
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("7.0.5", result.?);
+}
+
+test "classifyPort - new protocol ports" {
+    try std.testing.expectEqual(Protocol.dns, classifyPort(53));
+    try std.testing.expectEqual(Protocol.kerberos, classifyPort(88));
+    try std.testing.expectEqual(Protocol.kerberos, classifyPort(464));
+    try std.testing.expectEqual(Protocol.msrpc, classifyPort(135));
+    try std.testing.expectEqual(Protocol.msrpc, classifyPort(593));
+    try std.testing.expectEqual(Protocol.netbios, classifyPort(139));
+    try std.testing.expectEqual(Protocol.ldap, classifyPort(389));
+    try std.testing.expectEqual(Protocol.ldap, classifyPort(3268));
+    try std.testing.expectEqual(Protocol.xmpp, classifyPort(5222));
+    try std.testing.expectEqual(Protocol.xmpp, classifyPort(5269));
+    try std.testing.expectEqual(Protocol.socks, classifyPort(1080));
+    try std.testing.expectEqual(Protocol.socks, classifyPort(7777));
+}
+
+test "classifyPort - updated tls ports" {
+    try std.testing.expectEqual(Protocol.tls, classifyPort(3269));
+    try std.testing.expectEqual(Protocol.tls, classifyPort(7443));
+    try std.testing.expectEqual(Protocol.tls, classifyPort(9091));
+}
+
+test "classifyPort - updated http ports" {
+    try std.testing.expectEqual(Protocol.http, classifyPort(7070));
+}
+
+test "isKnownNonHttpPort - new protocol ports" {
+    try std.testing.expect(isKnownNonHttpPort(53));
+    try std.testing.expect(isKnownNonHttpPort(88));
+    try std.testing.expect(isKnownNonHttpPort(135));
+    try std.testing.expect(isKnownNonHttpPort(139));
+    try std.testing.expect(isKnownNonHttpPort(389));
+    try std.testing.expect(isKnownNonHttpPort(464));
+    try std.testing.expect(isKnownNonHttpPort(593));
+    try std.testing.expect(isKnownNonHttpPort(1080));
+    try std.testing.expect(isKnownNonHttpPort(3268));
+    try std.testing.expect(isKnownNonHttpPort(5222));
+    try std.testing.expect(isKnownNonHttpPort(5269));
+    try std.testing.expect(isKnownNonHttpPort(7777));
+}
+
+test "guessUnderlyingService - ALPN h2" {
+    const svc = guessUnderlyingService(12345, "h2");
+    try std.testing.expectEqualStrings("https", svc);
+}
+
+test "guessUnderlyingService - ALPN http/1.1" {
+    const svc = guessUnderlyingService(12345, "http/1.1");
+    try std.testing.expectEqualStrings("https", svc);
+}
+
+test "guessUnderlyingService - port-based detection" {
+    try std.testing.expectEqualStrings("https", guessUnderlyingService(443, ""));
+    try std.testing.expectEqualStrings("https", guessUnderlyingService(8443, ""));
+    try std.testing.expectEqualStrings("https", guessUnderlyingService(7443, ""));
+    try std.testing.expectEqualStrings("https", guessUnderlyingService(9091, ""));
+    try std.testing.expectEqualStrings("ldaps", guessUnderlyingService(636, ""));
+    try std.testing.expectEqualStrings("ldaps", guessUnderlyingService(3269, ""));
+    try std.testing.expectEqualStrings("imaps", guessUnderlyingService(993, ""));
+    try std.testing.expectEqualStrings("pop3s", guessUnderlyingService(995, ""));
+    try std.testing.expectEqualStrings("ftps", guessUnderlyingService(990, ""));
+    try std.testing.expectEqualStrings("smtps", guessUnderlyingService(465, ""));
+    try std.testing.expectEqualStrings("telnets", guessUnderlyingService(992, ""));
+}
+
+test "guessUnderlyingService - unknown port no ALPN" {
+    const svc = guessUnderlyingService(12345, "");
+    try std.testing.expectEqual(@as(usize, 0), svc.len);
+}
+
+test "isLikelyRealm - valid realms" {
+    try std.testing.expect(isLikelyRealm("EXAMPLE.COM"));
+    try std.testing.expect(isLikelyRealm("CORP.INTERNAL"));
+    try std.testing.expect(isLikelyRealm("MYDOMAIN"));
+}
+
+test "isLikelyRealm - invalid strings" {
+    try std.testing.expect(!isLikelyRealm(""));
+    try std.testing.expect(!isLikelyRealm("alllowercase"));
+    try std.testing.expect(!isLikelyRealm("has spaces"));
+    try std.testing.expect(!isLikelyRealm("bad\x00char"));
 }
