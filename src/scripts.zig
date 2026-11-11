@@ -813,7 +813,12 @@ fn scriptLdapRootdse(ip: u32, port: u16, hs: *HostScripts) void {
         0x02, 0x01, 0x00, // timeLimit = 0
         0x01, 0x01, 0x00, // typesOnly = false
         0x87, 0x0B, // present filter (context tag 7)
-        'o', 'b', 'j', 'e', 'c', 't', 'C', 'l', 'a', 's', 's',
+        'o',  'b',
+        'j',  'e',
+        'c',  't',
+        'C',  'l',
+        'a',  's',
+        's',
         0x30, 0x00, // attributes = all
     };
     _ = std.posix.write(fd, &ldap_search) catch return;
@@ -1077,11 +1082,16 @@ test "findLdapString - finds attribute value" {
     // Layout: some BER overhead, then "defaultNamingContext" as text, then 0x04 tag with value
     const data = [_]u8{
         0x30, 0x20, 0x04, 0x15,
-        'd',  'e',  'f',  'a',  'u', 'l', 't', 'N', 'a', 'm', 'i',
-        'n',  'g',  'C',  'o',  'n', 't', 'e', 'x', 't', 0x00,
-        0x31, 0x0F,
-        0x04, 0x0D,
-        'D',  'C',  '=',  't',  'e', 's', 't', ',', 'D', 'C', '=', 'c', 'o',
+        'd',  'e',  'f',  'a',
+        'u',  'l',  't',  'N',
+        'a',  'm',  'i',  'n',
+        'g',  'C',  'o',  'n',
+        't',  'e',  'x',  't',
+        0x00, 0x31, 0x0F, 0x04,
+        0x0D, 'D',  'C',  '=',
+        't',  'e',  's',  't',
+        ',',  'D',  'C',  '=',
+        'c',  'o',
     };
 
     const result = findLdapString(&data, "defaultNamingContext");
@@ -1098,7 +1108,7 @@ test "findLdapString - not found" {
 test "findLdapString - non-printable value skipped" {
     // Attribute name found, but next OCTET STRING contains non-printable bytes
     const data = [_]u8{
-        'd', 'n', 's', 'H', 'o', 's', 't', 'N', 'a', 'm', 'e',
+        'd',  'n',  's',  'H',  'o',  's', 't', 'N', 'a', 'm', 'e',
         0x04, 0x03, 0x01, 0x02, 0x03,
     };
     const result = findLdapString(&data, "dnsHostName");

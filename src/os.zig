@@ -204,6 +204,10 @@ pub fn detect(ip: u32, open_port: u16) OsInfo {
 
         const idx = probe_idx.?;
 
+        // Validate ACK number matches our SEQ + 1
+        const expected_ack = (0x12345678 +% @as(u32, @intCast(idx))) +% 1;
+        if (packet.fromNet(u32, tcp_hdr.ack_num) != expected_ack) continue;
+
         const data_off: usize = @as(usize, (packet.fromNet(u16, tcp_hdr.data_off_flags) >> 12) & 0xF) * 4;
         var opts = TcpOptions{};
         if (data_off > 20 and n >= ihl + data_off) {
