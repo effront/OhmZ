@@ -1,6 +1,7 @@
 const std = @import("std");
 const packet = @import("packet.zig");
 const tx_mod = @import("tx.zig");
+const platform = @import("platform.zig");
 
 const MAX_HOPS: u8 = 30;
 const MAX_WORKERS: usize = 16;
@@ -253,14 +254,14 @@ fn openSendSocket() ?std.posix.fd_t {
     const fd = std.posix.socket(
         std.posix.AF.INET,
         std.posix.SOCK.RAW,
-        std.posix.IPPROTO.RAW,
+        platform.IPPROTO_RAW,
     ) catch return null;
 
     const hdr_incl: c_int = 1;
     std.posix.setsockopt(
         fd,
         std.posix.IPPROTO.IP,
-        std.posix.system.IP.HDRINCL,
+        platform.IP_HDRINCL,
         std.mem.asBytes(&hdr_incl),
     ) catch {
         std.posix.close(fd);

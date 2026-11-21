@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const cli = @import("cli.zig");
 const target_mod = @import("target.zig");
 const packet = @import("packet.zig");
@@ -257,7 +258,19 @@ pub fn main() !void {
     }
 
     // OS fingerprinting (-O) and Traceroute (--traceroute) need raw sockets
-    const is_root = std.os.linux.geteuid() == 0;
+    const is_root = blk: {
+        if (comptime builtin.os.tag == .linux) {
+            break :blk std.os.linux.geteuid() == 0;
+        } else if (comptime builtin.os.tag == .macos) {
+            // macOS syscall: geteuid = 25 (via syscall convention 0x2000000 + 25)
+            break :blk asm volatile ("svc #0x80"
+                : [ret] "={x0}" (-> u32),
+                : [num] "{x16}" (@as(usize, 0x2000000 + 25)),
+            ) == 0;
+        } else {
+            break :blk false;
+        }
+    };
 
     var os_results_buf: [256]os_mod.OsInfo = undefined;
     var os_results: ?[]os_mod.OsInfo = null;

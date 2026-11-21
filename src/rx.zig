@@ -4,6 +4,7 @@ const cookie_mod = @import("cookie.zig");
 const stats_mod = @import("stats.zig");
 const target_mod = @import("target.zig");
 const cli = @import("cli.zig");
+const platform = @import("platform.zig");
 
 pub const ScanResult = struct {
     ip: u32,
@@ -59,7 +60,7 @@ pub const RxEngine = struct {
             const n = std.posix.recvfrom(
                 self.sock_fd,
                 &recv_buf,
-                std.posix.MSG.DONTWAIT,
+                platform.MSG_DONTWAIT,
                 null,
                 null,
             ) catch |err| {
@@ -161,7 +162,7 @@ pub const RxEngine = struct {
             const n = std.posix.recvfrom(
                 self.sock_fd,
                 buf,
-                std.posix.MSG.DONTWAIT,
+                platform.MSG_DONTWAIT,
                 null,
                 null,
             ) catch break;
