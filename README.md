@@ -646,8 +646,8 @@ zig build -Dtarget=arm-linux-gnueabihf # ARM 32-bit (Tier 3)
 +-------+------------------------------------------+----------+
 |   7   |  macOS cross-platform, 7 new probes      |  DONE    |
 |       |  (DNS, Kerberos, MSRPC, NetBIOS, LDAP,   |  v0.7.0  |
-|       |  XMPP, SOCKS5), 6 new scripts, 45 sigs, |          |
-|       |  multi-probe OS detection, TCP perf       |          |
+|       |  XMPP, SOCKS5), 6 new scripts, 45 sigs,  |          |
+|       |  multi-probe OS detection, TCP perf      |          |
 +-------+------------------------------------------+----------+
 |   8   |  Advanced: IPv6, SCTP, io_uring backend, |  PLAN    |
 |       |  evasion techniques, multi-NIC, sharding,|          |
