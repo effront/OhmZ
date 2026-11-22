@@ -16,7 +16,7 @@ const os_mod = @import("os.zig");
 const traceroute_mod = @import("traceroute.zig");
 const scripts_mod = @import("scripts.zig");
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
