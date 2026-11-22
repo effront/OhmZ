@@ -193,7 +193,7 @@ brew tap effront/tap && brew install ohmz
 docker run --cap-add=NET_RAW ghcr.io/effront/ohmz -sS 192.168.1.0/24
 
 # Or download the .deb
-sudo dpkg -i ohmz_0.6.0_amd64.deb
+sudo dpkg -i ohmz_0.7.0_amd64.deb
 ```
 
 ### Prerequisites
@@ -644,7 +644,12 @@ zig build -Dtarget=arm-linux-gnueabihf # ARM 32-bit (Tier 3)
 |       |  FastAPI auto-discovery, 88 unit tests,  |          |
 |       |  all output writers fixed, 4 new scripts |          |
 +-------+------------------------------------------+----------+
-|   7   |  Advanced: IPv6, SCTP, io_uring backend, |  PLAN    |
+|   7   |  macOS cross-platform, 7 new probes      |  DONE    |
+|       |  (DNS, Kerberos, MSRPC, NetBIOS, LDAP,   |  v0.7.0  |
+|       |  XMPP, SOCKS5), 6 new scripts, 45 sigs, |          |
+|       |  multi-probe OS detection, TCP perf       |          |
++-------+------------------------------------------+----------+
+|   8   |  Advanced: IPv6, SCTP, io_uring backend, |  PLAN    |
 |       |  evasion techniques, multi-NIC, sharding,|          |
 |       |  plugin system (comptime + WASM)         |          |
 +=======+==========================================+==========+
