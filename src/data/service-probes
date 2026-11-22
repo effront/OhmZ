@@ -20,11 +20,26 @@ IMAP|p|* OK |-1
 VNC|p|RFB |4
 NATS|p|INFO {|-1
 Rsync|p|@RSYNCD: |9
+# Databases
+CouchDB|p|{"couchdb":|-1
+RethinkDB|c|"success":true|-1
+# VoIP
+Asterisk|p|Asterisk Call Manager/|22
+# Gaming
+TeamSpeak|p|TS3|3
 
 [http]
 # Header-based detection
 Jenkins|c|X-Jenkins:|-1
 Kibana|c|kbn-name|-1
+Forgejo|c|X-Forgejo-Version|-1
+Docker Registry|c|Docker-Distribution-Api-Version|-1
+Harbor Registry|c|X-Harbor-Csrf-Token|-1
+Spring Boot|c|X-Application-Context|-1
+IIS|c|X-Powered-By: ASP.NET|-1
+WildFly|c|X-Powered-By: WildFly|-1
+Puma|c|X-Runtime:|-1
+Werkzeug|c|Server: Werkzeug|-1
 # Title-based detection - common self-hosted services
 GitLab|c|<title>GitLab|-1
 Grafana|c|<title>Grafana|-1
@@ -54,3 +69,43 @@ Redmine|c|<title>Redmine|-1
 Cockpit|c|<title>Cockpit|-1
 Webmin|c|<title>Webmin|-1
 Pi-hole|c|<title>Pi-hole|-1
+# CI/CD
+TeamCity|c|<title>TeamCity|-1
+Drone|c|<title>Drone|-1
+Bamboo|c|<title>Bamboo|-1
+CircleCI|c|<title>CircleCI|-1
+# Monitoring
+Datadog|c|<title>Datadog|-1
+Icinga|c|<title>Icinga|-1
+Nagios|c|<title>Nagios|-1
+Cacti|c|<title>Cacti|-1
+LibreNMS|c|<title>LibreNMS|-1
+Uptime Kuma|c|<title>Uptime Kuma|-1
+Checkmk|c|<title>Checkmk|-1
+# Dev tools
+Gogs|c|<title>Gogs|-1
+GitBucket|c|<title>GitBucket|-1
+Redash|c|<title>Redash|-1
+Metabase|c|<title>Metabase|-1
+Superset|c|<title>Superset|-1
+Airflow|c|<title>Airflow|-1
+n8n|c|<title>n8n|-1
+# Web servers and proxies
+Tomcat|c|<title>Apache Tomcat|-1
+Traefik|c|<title>Traefik|-1
+HAProxy|c|<title>HAProxy|-1
+Nginx Proxy Manager|c|<title>Nginx Proxy Manager|-1
+Openfire|c|Openfire|-1
+Envoy|c|envoy|-1
+Caddy|c|Caddy|-1
+# Security
+Wazuh|c|<title>Wazuh|-1
+OSSEC|c|<title>OSSEC|-1
+Snort|c|<title>Snort|-1
+# Storage and registries
+Ceph|c|<title>Ceph|-1
+Nexus|c|<title>Nexus|-1
+Artifactory|c|<title>Artifactory|-1
+# Container orchestration
+Kubernetes|c|<title>Kubernetes|-1
+Nomad|c|<title>Nomad|-1

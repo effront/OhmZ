@@ -6,6 +6,7 @@ const blackrock = @import("blackrock.zig");
 const throttle_mod = @import("throttle.zig");
 const stats_mod = @import("stats.zig");
 const cli = @import("cli.zig");
+const platform = @import("platform.zig");
 
 pub const TxEngine = struct {
     sock_fd: std.posix.fd_t,
@@ -133,7 +134,7 @@ fn openRawSocket() !std.posix.fd_t {
     const fd = try std.posix.socket(
         std.posix.AF.INET,
         std.posix.SOCK.RAW,
-        std.posix.IPPROTO.RAW,
+        platform.IPPROTO_RAW,
     );
     errdefer std.posix.close(fd);
 
@@ -141,7 +142,7 @@ fn openRawSocket() !std.posix.fd_t {
     try std.posix.setsockopt(
         fd,
         std.posix.IPPROTO.IP,
-        std.posix.system.IP.HDRINCL,
+        platform.IP_HDRINCL,
         std.mem.asBytes(&hdr_incl),
     );
 

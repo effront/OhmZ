@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const ETH_P_IP: u16 = 0x0800;
+pub const IPPROTO_ICMP: u8 = 1;
 pub const IPPROTO_TCP: u8 = 6;
 
 pub const Ipv4Header = extern struct {
@@ -42,6 +43,8 @@ pub const TcpFlags = struct {
     pub const PSH: u16 = 0x0008;
     pub const ACK: u16 = 0x0010;
     pub const URG: u16 = 0x0020;
+    pub const ECE: u16 = 0x0040;
+    pub const CWR: u16 = 0x0080;
 };
 
 pub const PACKET_SIZE = @sizeOf(Ipv4Header) + @sizeOf(TcpHeader);

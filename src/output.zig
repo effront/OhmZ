@@ -207,7 +207,7 @@ pub const XmlWriter = struct {
         };
         const w = xw.bw.writer();
         w.writeAll("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n") catch {};
-        w.writeAll("<ohmzscan scanner=\"ohmz\" version=\"0.6.0\">\n") catch {};
+        w.writeAll("<ohmzscan scanner=\"ohmz\" version=\"0.7.0\">\n") catch {};
         return xw;
     }
 
