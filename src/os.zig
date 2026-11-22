@@ -1,6 +1,7 @@
 const std = @import("std");
 const packet = @import("packet.zig");
 const tx_mod = @import("tx.zig");
+const platform = @import("platform.zig");
 
 const MAX_WORKERS: usize = 32;
 const PROBE_TIMEOUT_NS: u64 = 3 * std.time.ns_per_s;
@@ -746,7 +747,7 @@ fn openRawSendSocket() !std.posix.fd_t {
     const fd = try std.posix.socket(
         std.posix.AF.INET,
         std.posix.SOCK.RAW,
-        std.posix.IPPROTO.RAW,
+        platform.IPPROTO_RAW,
     );
     errdefer std.posix.close(fd);
 
@@ -754,7 +755,7 @@ fn openRawSendSocket() !std.posix.fd_t {
     try std.posix.setsockopt(
         fd,
         std.posix.IPPROTO.IP,
-        std.posix.system.IP.HDRINCL,
+        platform.IP_HDRINCL,
         std.mem.asBytes(&hdr_incl),
     );
 

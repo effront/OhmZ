@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const stats_mod = @import("stats.zig");
 const ScanStats = stats_mod.ScanStats;
 const ScanSnapshot = stats_mod.ScanSnapshot;
@@ -181,10 +182,12 @@ pub const ProgressBar = struct {
     }
 
     fn getTermCols() usize {
-        const WinSize = extern struct { row: u16, col: u16, xpix: u16, ypix: u16 };
-        var ws: WinSize = std.mem.zeroes(WinSize);
-        const rc = std.os.linux.ioctl(2, 0x5413, @intFromPtr(&ws));
-        if (@as(isize, @bitCast(rc)) >= 0 and ws.col > 0) return ws.col;
+        if (comptime builtin.os.tag == .linux) {
+            const WinSize = extern struct { row: u16, col: u16, xpix: u16, ypix: u16 };
+            var ws: WinSize = std.mem.zeroes(WinSize);
+            const rc = std.os.linux.ioctl(2, 0x5413, @intFromPtr(&ws));
+            if (@as(isize, @bitCast(rc)) >= 0 and ws.col > 0) return ws.col;
+        }
         return 80;
     }
 
