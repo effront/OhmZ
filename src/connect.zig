@@ -4,9 +4,9 @@ const blackrock = @import("blackrock.zig");
 const stats_mod = @import("stats.zig");
 const rx_mod = @import("rx.zig");
 
-const CONNECT_TIMEOUT_MS: i64 = 3000;
+const CONNECT_TIMEOUT_MS: i64 = 1500;
 const MAX_INFLIGHT: usize = 4096;
-const POLL_INTERVAL_MS: i32 = 10;
+const MAX_BURST: f64 = 100.0;
 
 pub const ConnectEngine = struct {
     target_space: *const target_mod.TargetSpace,
@@ -65,7 +65,7 @@ pub const ConnectEngine = struct {
             const elapsed_ns = now_ns - last_refill_ns;
             if (elapsed_ns > 0) {
                 tokens += @as(f64, @floatFromInt(elapsed_ns)) * rate_f / 1_000_000_000.0;
-                tokens = @min(tokens, rate_f);
+                tokens = @min(tokens, MAX_BURST);
                 last_refill_ns = now_ns;
             }
 
@@ -130,7 +130,14 @@ pub const ConnectEngine = struct {
             }
 
             const can_send = tokens >= 1.0 and active < MAX_INFLIGHT and index < self.target_space.total_targets;
-            const poll_timeout: i32 = if (can_send) 0 else POLL_INTERVAL_MS;
+            const poll_timeout: i32 = if (can_send) 0 else blk: {
+                var nearest: i64 = now_ms + 50;
+                for (deadlines[0..active]) |dl| {
+                    if (dl < nearest) nearest = dl;
+                }
+                const wait = nearest - now_ms;
+                break :blk @intCast(@max(wait, 1));
+            };
 
             for (pfds[0..active]) |*pfd| pfd.revents = 0;
             _ = std.posix.poll(pfds[0..active], poll_timeout) catch 0;
