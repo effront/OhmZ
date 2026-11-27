@@ -589,63 +589,213 @@ fn probeTls(ip: u32, port: u16) ServiceInfo {
     var info = ServiceInfo{};
 
     const tls_info = tls_mod.probe(ip, port);
-    if (!tls_info.valid) return info;
+    const raw_ok = tls_info.valid;
 
-    info.tls = true;
+    if (raw_ok) {
+        info.tls = true;
 
-    const cn = tls_info.subjectCn();
-    if (cn.len > 0) {
-        info.setName(cn);
-    }
+        const cn = tls_info.subjectCn();
+        if (cn.len > 0) {
+            info.setName(cn);
+        }
 
-    const ver = tls_info.versionStr();
-    const cipher = tls_info.cipherStr();
-    const expiry = tls_info.notAfter();
+        const ver = tls_info.versionStr();
+        const cipher = tls_info.cipherStr();
+        const expiry = tls_info.notAfter();
+        const alpn_str = tls_info.alpn();
 
-    const alpn_str = tls_info.alpn();
+        var extra: [256]u8 = undefined;
+        var elen: usize = 0;
 
-    var extra: [256]u8 = undefined;
-    var elen: usize = 0;
+        if (ver.len > 0) {
+            const written = std.fmt.bufPrint(extra[elen..], "{s}", .{ver}) catch "";
+            elen += written.len;
+        }
+        if (alpn_str.len > 0) {
+            const written = std.fmt.bufPrint(extra[elen..], ", {s}", .{alpn_str}) catch "";
+            elen += written.len;
+        }
+        if (cipher.len > 0) {
+            const written = std.fmt.bufPrint(extra[elen..], " {s}", .{cipher}) catch "";
+            elen += written.len;
+        }
+        if (expiry.len > 0) {
+            const written = std.fmt.bufPrint(extra[elen..], " exp:{s}", .{expiry}) catch "";
+            elen += written.len;
+        }
 
-    if (ver.len > 0) {
-        const written = std.fmt.bufPrint(extra[elen..], "{s}", .{ver}) catch "";
-        elen += written.len;
-    }
-    if (alpn_str.len > 0) {
-        const written = std.fmt.bufPrint(extra[elen..], ", {s}", .{alpn_str}) catch "";
-        elen += written.len;
-    }
-    if (cipher.len > 0) {
-        const written = std.fmt.bufPrint(extra[elen..], " {s}", .{cipher}) catch "";
-        elen += written.len;
-    }
-    if (expiry.len > 0) {
-        const written = std.fmt.bufPrint(extra[elen..], " exp:{s}", .{expiry}) catch "";
-        elen += written.len;
-    }
+        if (elen > 0) {
+            info.setExtra(extra[0..elen]);
+        }
 
-    if (elen > 0) {
-        info.setExtra(extra[0..elen]);
-    }
+        const issuer = tls_info.issuerCn();
+        if (cn.len > 0 and issuer.len > 0) {
+            var vbuf: [128]u8 = undefined;
+            const vstr = std.fmt.bufPrint(&vbuf, "{s} (issuer: {s})", .{ cn, issuer }) catch cn;
+            info.setVersion(vstr);
+        } else if (cn.len > 0) {
+            info.setVersion(cn);
+        } else if (ver.len > 0) {
+            info.setVersion(ver);
+        }
 
-    const issuer = tls_info.issuerCn();
-    if (cn.len > 0 and issuer.len > 0) {
-        var vbuf: [128]u8 = undefined;
-        const vstr = std.fmt.bufPrint(&vbuf, "{s} (issuer: {s})", .{ cn, issuer }) catch cn;
-        info.setVersion(vstr);
-    } else if (cn.len > 0) {
-        info.setVersion(cn);
-    } else if (ver.len > 0) {
-        info.setVersion(ver);
-    }
+        const underlying = guessUnderlyingService(port, alpn_str);
+        if (underlying.len > 0) {
+            info.setName(underlying);
+        }
 
-    // Label the underlying protocol based on ALPN or well-known TLS port
-    const underlying = guessUnderlyingService(port, alpn_str);
-    if (underlying.len > 0) {
-        info.setName(underlying);
+        // Probe HTTP over TLS using cert CN/SANs as SNI
+        if (std.mem.eql(u8, underlying, "https")) {
+            probeHttpOverTls(ip, port, cn, tls_info.sans(), &info);
+        }
+    } else {
+        // Raw probe failed - try std.crypto.tls as fallback for HTTPS ports
+        info.tls = true;
+        const underlying = guessUnderlyingService(port, "");
+        if (underlying.len > 0) {
+            info.setName(underlying);
+        }
+        if (std.mem.eql(u8, underlying, "https")) {
+            tryHttpOverTlsNoVerify(ip, port, &info);
+        }
     }
 
     return info;
+}
+
+fn probeHttpOverTls(ip: u32, port: u16, cn: []const u8, sans: []const u8, info: *ServiceInfo) void {
+    // Try CN first, then first SAN, then no_verification fallback
+    if (cn.len > 0 and !isIpString(cn)) {
+        if (tryHttpOverTls(ip, port, cn, info)) return;
+    }
+    if (sans.len > 0) {
+        const comma = std.mem.indexOfScalar(u8, sans, ',') orelse sans.len;
+        const first_san = sans[0..comma];
+        if (first_san.len > 0 and !std.mem.eql(u8, first_san, cn) and !isIpString(first_san)) {
+            if (tryHttpOverTls(ip, port, first_san, info)) return;
+        }
+    }
+    // Last resort: no SNI verification
+    tryHttpOverTlsNoVerify(ip, port, info);
+}
+
+fn tryHttpOverTlsNoVerify(ip: u32, port: u16, info: *ServiceInfo) void {
+    const addr = std.net.Address.initIp4(
+        .{ @intCast((ip >> 24) & 0xFF), @intCast((ip >> 16) & 0xFF), @intCast((ip >> 8) & 0xFF), @intCast(ip & 0xFF) },
+        port,
+    );
+    const tcp = std.net.tcpConnectToAddress(addr) catch return;
+    defer tcp.close();
+
+    const timeval = extern struct { sec: isize, usec: isize };
+    const tv = timeval{ .sec = IO_TIMEOUT_SECS, .usec = 0 };
+    const tv_bytes = std.mem.asBytes(&tv);
+    std.posix.setsockopt(tcp.handle, std.posix.SOL.SOCKET, SO_RCVTIMEO, tv_bytes) catch {};
+    std.posix.setsockopt(tcp.handle, std.posix.SOL.SOCKET, SO_SNDTIMEO, tv_bytes) catch {};
+
+    var tls_client = std.crypto.tls.Client.init(tcp, .{
+        .host = .no_verification,
+        .ca = .no_verification,
+    }) catch return;
+
+    var ip_buf: [16]u8 = undefined;
+    const ip_str = formatIp(&ip_buf, ip);
+    var req_buf: [256]u8 = undefined;
+    const request = std.fmt.bufPrint(&req_buf, "GET / HTTP/1.1\r\nHost: {s}:{d}\r\nConnection: close\r\n\r\n", .{ ip_str, port }) catch return;
+
+    tls_client.writeAll(tcp, request) catch return;
+
+    var buf: [4096]u8 = undefined;
+    const n = tls_client.read(tcp, &buf) catch return;
+    if (n == 0) return;
+
+    const data = buf[0..n];
+    if (!std.mem.startsWith(u8, data, "HTTP/")) return;
+
+    if (findHeaderValue(data, "server:")) |server| {
+        parseServerHeader(server, info);
+    }
+    if (findHeaderValue(data, "x-powered-by:")) |val| {
+        info.setExtra(val);
+    }
+
+    fingerprintHttp(data, info);
+
+    if (info.name_len > 0 and std.mem.eql(u8, info.name(), "http")) {
+        info.setName("https");
+    }
+}
+
+fn isIpString(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (c != '.' and (c < '0' or c > '9')) return false;
+    }
+    return true;
+}
+
+fn tryHttpOverTls(ip: u32, port: u16, hostname: []const u8, info: *ServiceInfo) bool {
+    const addr = std.net.Address.initIp4(
+        .{ @intCast((ip >> 24) & 0xFF), @intCast((ip >> 16) & 0xFF), @intCast((ip >> 8) & 0xFF), @intCast(ip & 0xFF) },
+        port,
+    );
+    const tcp = std.net.tcpConnectToAddress(addr) catch return false;
+    defer tcp.close();
+
+    const timeval = extern struct { sec: isize, usec: isize };
+    const tv = timeval{ .sec = IO_TIMEOUT_SECS, .usec = 0 };
+    const tv_bytes = std.mem.asBytes(&tv);
+    std.posix.setsockopt(tcp.handle, std.posix.SOL.SOCKET, SO_RCVTIMEO, tv_bytes) catch {};
+    std.posix.setsockopt(tcp.handle, std.posix.SOL.SOCKET, SO_SNDTIMEO, tv_bytes) catch {};
+
+    var tls_client = std.crypto.tls.Client.init(tcp, .{
+        .host = .{ .explicit = hostname },
+        .ca = .no_verification,
+    }) catch return false;
+
+    var req_buf: [256]u8 = undefined;
+    const request = std.fmt.bufPrint(&req_buf, "GET / HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{hostname}) catch return false;
+
+    tls_client.writeAll(tcp, request) catch return false;
+
+    var buf: [4096]u8 = undefined;
+    const n = tls_client.read(tcp, &buf) catch return false;
+    if (n == 0) return false;
+
+    const data = buf[0..n];
+    if (!std.mem.startsWith(u8, data, "HTTP/")) return false;
+
+    // Save TLS extra info before HTTP probe may overwrite it
+    var tls_extra: [256]u8 = undefined;
+    var tls_extra_len: usize = 0;
+    const existing_extra = info.extra();
+    if (existing_extra.len > 0) {
+        tls_extra_len = existing_extra.len;
+        @memcpy(tls_extra[0..tls_extra_len], existing_extra);
+    }
+
+    if (findHeaderValue(data, "server:")) |server| {
+        parseServerHeader(server, info);
+    }
+    if (findHeaderValue(data, "x-powered-by:")) |val| {
+        if (tls_extra_len > 0) {
+            var merged: [256]u8 = undefined;
+            const m = std.fmt.bufPrint(&merged, "{s} | {s}", .{ tls_extra[0..tls_extra_len], val }) catch val;
+            info.setExtra(m);
+        } else {
+            info.setExtra(val);
+        }
+    } else if (tls_extra_len > 0) {
+        info.setExtra(tls_extra[0..tls_extra_len]);
+    }
+
+    fingerprintHttp(data, info);
+
+    if (info.name_len > 0 and std.mem.eql(u8, info.name(), "http")) {
+        info.setName("https");
+    }
+
+    return true;
 }
 
 fn probeMemcached(ip: u32, port: u16) ServiceInfo {
