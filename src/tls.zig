@@ -102,6 +102,8 @@ pub fn probe(ip: u32, port: u16) TlsInfo {
 fn hasAllRecords(data: []const u8) bool {
     var pos: usize = 0;
     var saw_cert = false;
+    var saw_server_hello = false;
+    var is_tls13 = false;
     while (pos + 5 <= data.len) {
         const record_len = readU16(data[pos + 3 .. pos + 5]);
         if (pos + 5 + record_len > data.len) return false;
@@ -111,12 +113,38 @@ fn hasAllRecords(data: []const u8) bool {
             while (hpos + 4 <= hend) {
                 const hs_type = data[hpos];
                 const hs_len = readU24(data[hpos + 1 .. hpos + 4]);
+                if (hs_type == 2) {
+                    saw_server_hello = true;
+                    is_tls13 = detectTls13(data[hpos + 4 ..][0..@min(hs_len, hend - hpos - 4)]);
+                }
                 if (hs_type == 11) saw_cert = true;
                 hpos += 4 + hs_len;
             }
         }
         pos += 5 + record_len;
         if (saw_cert) return true;
+        // TLS 1.3: Certificate is encrypted, stop after ServerHello + any following record
+        if (is_tls13 and saw_server_hello and pos > 0) return true;
+    }
+    return false;
+}
+
+fn detectTls13(server_hello: []const u8) bool {
+    if (server_hello.len < 38) return false;
+    const session_id_len: usize = server_hello[34];
+    const ext_offset = 35 + session_id_len + 3; // +2 cipher +1 compression
+    if (ext_offset + 2 > server_hello.len) return false;
+    const ext_total = readU16(server_hello[ext_offset .. ext_offset + 2]);
+    var epos: usize = ext_offset + 2;
+    const ext_end = @min(epos + ext_total, server_hello.len);
+    while (epos + 4 <= ext_end) {
+        const etype = readU16(server_hello[epos .. epos + 2]);
+        const elen = readU16(server_hello[epos + 2 .. epos + 4]);
+        epos += 4;
+        if (etype == 0x002B and elen >= 2) {
+            return server_hello[epos] == 0x03 and server_hello[epos + 1] == 0x04;
+        }
+        epos += elen;
     }
     return false;
 }
@@ -442,10 +470,10 @@ fn readU24(b: []const u8) usize {
     return (@as(usize, b[0]) << 16) | (@as(usize, b[1]) << 8) | @as(usize, b[2]);
 }
 
-const HelloMsg = struct { data: [384]u8, len: usize };
+const HelloMsg = struct { data: [512]u8, len: usize };
 
 fn buildClientHello() HelloMsg {
-    var buf: [384]u8 = .{0} ** 384;
+    var buf: [512]u8 = .{0} ** 512;
     var pos: usize = 0;
 
     buf[pos] = 22;
@@ -594,6 +622,22 @@ fn buildClientHello() HelloMsg {
     buf[pos + 1] = 0x03;
     pos += 2; // TLS 1.2
 
+    // Extension: key_share (0x0033) - x25519 public key (required for TLS 1.3)
+    buf[pos] = 0x00;
+    buf[pos + 1] = 0x33;
+    pos += 2;
+    std.mem.writeInt(u16, buf[pos..][0..2], 38, .big);
+    pos += 2; // extension data length: 2 (list len) + 2 (group) + 2 (key len) + 32 (key)
+    std.mem.writeInt(u16, buf[pos..][0..2], 36, .big);
+    pos += 2; // key share list length
+    buf[pos] = 0x00;
+    buf[pos + 1] = 0x1D;
+    pos += 2; // group: x25519 (0x001D)
+    std.mem.writeInt(u16, buf[pos..][0..2], 32, .big);
+    pos += 2; // key length
+    std.posix.getrandom(buf[pos .. pos + 32]) catch {};
+    pos += 32; // random x25519 public key (we don't need to decrypt)
+
     const ext_len: u16 = @intCast(pos - ext_len_pos - 2);
     std.mem.writeInt(u16, buf[ext_len_pos..][0..2], ext_len, .big);
 
@@ -690,7 +734,7 @@ test "buildClientHello - valid TLS record" {
     try std.testing.expectEqual(@as(u8, 0x01), hello.data[2]); // minor (compat)
     try std.testing.expectEqual(@as(u8, 1), hello.data[5]); // ClientHello type
     try std.testing.expect(hello.len > 100);
-    try std.testing.expect(hello.len < 384);
+    try std.testing.expect(hello.len < 512);
 }
 
 test "TlsInfo - setStr truncates" {
