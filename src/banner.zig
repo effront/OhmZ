@@ -219,8 +219,9 @@ fn probeHttp(ip: u32, port: u16) ServiceInfo {
     _ = std.posix.write(fd, request) catch return info;
 
     var buf: [4096]u8 = undefined;
-    const n = std.posix.read(fd, &buf) catch return info;
-    if (n == 0) return info;
+    const n = std.posix.read(fd, &buf) catch 0;
+
+    if (n == 0) return probeHttpFallbacks(ip, port);
 
     const data = buf[0..n];
 
@@ -262,6 +263,58 @@ fn probeHttp(ip: u32, port: u16) ServiceInfo {
     }
 
     return info;
+}
+
+fn probeHttpFallbacks(ip: u32, port: u16) ServiceInfo {
+    // Try HTTP/1.0 (no Host header) - works on many misconfigured/embedded servers
+    {
+        const fd = openSocket(ip, port) orelse return ServiceInfo{};
+        defer std.posix.close(fd);
+        _ = std.posix.write(fd, "GET / HTTP/1.0\r\n\r\n") catch {};
+        var buf: [4096]u8 = undefined;
+        const n = std.posix.read(fd, &buf) catch 0;
+        if (n > 0) {
+            const data = buf[0..n];
+            if (std.mem.startsWith(u8, data, "HTTP/")) {
+                var info = ServiceInfo{};
+                processHttpResponse(data, &info);
+                return info;
+            }
+        }
+    }
+    // Try RTSP probe - triggers 400 responses on servers that ignore HTTP
+    {
+        const fd = openSocket(ip, port) orelse return ServiceInfo{};
+        defer std.posix.close(fd);
+        _ = std.posix.write(fd, "OPTIONS / RTSP/1.0\r\n\r\n") catch {};
+        var buf: [4096]u8 = undefined;
+        const n = std.posix.read(fd, &buf) catch 0;
+        if (n > 0) {
+            const data = buf[0..n];
+            if (std.mem.startsWith(u8, data, "HTTP/")) {
+                var info = ServiceInfo{};
+                processHttpResponse(data, &info);
+                return info;
+            }
+        }
+    }
+    return ServiceInfo{};
+}
+
+fn processHttpResponse(data: []const u8, info: *ServiceInfo) void {
+    if (findHeaderValue(data, "server:")) |server| {
+        parseServerHeader(server, info);
+    }
+    if (findHeaderValue(data, "x-powered-by:")) |val| {
+        info.setExtra(val);
+    }
+    if (info.name_len == 0) {
+        if (extractTitle(data)) |title| {
+            info.setVersion(title);
+        }
+        info.setName("http");
+    }
+    fingerprintHttp(data, info);
 }
 
 fn storeHttpEvidence(data: []const u8, info: *ServiceInfo) void {
@@ -660,7 +713,28 @@ fn probeTls(ip: u32, port: u16) ServiceInfo {
         }
     }
 
+    // Last resort: plain HTTP on TLS port - server returns 400 with Server header
+    if (info.name_len == 0 or std.mem.eql(u8, info.name(), "https")) {
+        probePlainHttpOnTlsPort(ip, port, &info);
+    }
+
     return info;
+}
+
+fn probePlainHttpOnTlsPort(ip: u32, port: u16, info: *ServiceInfo) void {
+    const fd = openSocket(ip, port) orelse return;
+    defer std.posix.close(fd);
+
+    _ = std.posix.write(fd, "GET / HTTP/1.0\r\n\r\n") catch return;
+
+    var buf: [4096]u8 = undefined;
+    const n = std.posix.read(fd, &buf) catch return;
+    if (n == 0) return;
+
+    const data = buf[0..n];
+    if (!std.mem.startsWith(u8, data, "HTTP/")) return;
+
+    processHttpResponse(data, info);
 }
 
 fn probeHttpOverTls(ip: u32, port: u16, cn: []const u8, sans: []const u8, info: *ServiceInfo) void {
@@ -712,14 +786,7 @@ fn tryHttpOverTlsNoVerify(ip: u32, port: u16, info: *ServiceInfo) void {
     const data = buf[0..n];
     if (!std.mem.startsWith(u8, data, "HTTP/")) return;
 
-    if (findHeaderValue(data, "server:")) |server| {
-        parseServerHeader(server, info);
-    }
-    if (findHeaderValue(data, "x-powered-by:")) |val| {
-        info.setExtra(val);
-    }
-
-    fingerprintHttp(data, info);
+    processHttpResponse(data, info);
 
     if (info.name_len > 0 and std.mem.eql(u8, info.name(), "http")) {
         info.setName("https");
@@ -774,22 +841,19 @@ fn tryHttpOverTls(ip: u32, port: u16, hostname: []const u8, info: *ServiceInfo) 
         @memcpy(tls_extra[0..tls_extra_len], existing_extra);
     }
 
-    if (findHeaderValue(data, "server:")) |server| {
-        parseServerHeader(server, info);
-    }
-    if (findHeaderValue(data, "x-powered-by:")) |val| {
-        if (tls_extra_len > 0) {
+    processHttpResponse(data, info);
+
+    // Restore TLS extra merged with any new extra
+    if (tls_extra_len > 0) {
+        const new_extra = info.extra();
+        if (new_extra.len > 0 and !std.mem.eql(u8, new_extra, tls_extra[0..tls_extra_len])) {
             var merged: [256]u8 = undefined;
-            const m = std.fmt.bufPrint(&merged, "{s} | {s}", .{ tls_extra[0..tls_extra_len], val }) catch val;
+            const m = std.fmt.bufPrint(&merged, "{s} | {s}", .{ tls_extra[0..tls_extra_len], new_extra }) catch new_extra;
             info.setExtra(m);
         } else {
-            info.setExtra(val);
+            info.setExtra(tls_extra[0..tls_extra_len]);
         }
-    } else if (tls_extra_len > 0) {
-        info.setExtra(tls_extra[0..tls_extra_len]);
     }
-
-    fingerprintHttp(data, info);
 
     if (info.name_len > 0 and std.mem.eql(u8, info.name(), "http")) {
         info.setName("https");
@@ -1568,7 +1632,7 @@ fn probeGeneric(ip: u32, port: u16) ServiceInfo {
         defer std.posix.close(fd);
 
         var buf: [1024]u8 = undefined;
-        const n = readWithTimeout(fd, &buf, 1_000_000_000);
+        const n = readWithTimeout(fd, &buf, 3_000_000_000);
         if (n > 0) {
             const data = buf[0..n];
             const result = classifyBanner(data, ip, port);
@@ -1884,6 +1948,26 @@ fn parseServerHeader(server: []const u8, info: *ServiceInfo) void {
 fn fingerprintHttp(data: []const u8, info: *ServiceInfo) void {
     const body_start = if (std.mem.indexOf(u8, data, "\r\n\r\n")) |pos| pos + 4 else data.len;
     const body = if (body_start < data.len) data[body_start..] else "";
+    const headers = data[0..@min(body_start, data.len)];
+
+    // Cookie/header fingerprints for web panels (check before early returns)
+    if (findCookieName(headers, "cloudpanel")) {
+        info.setName("CloudPanel");
+        return;
+    }
+    if (findCookieName(headers, "plesk_session") or findCookieName(headers, "JEESSION_PLESK")) {
+        info.setName("Plesk");
+        return;
+    }
+    if (findCookieName(headers, "whm_locale") or findCookieName(headers, "cprelogin")) {
+        info.setName("cPanel");
+        return;
+    }
+    if (findHeaderValue(headers, "x-owa-version:")) |ver| {
+        info.setName("OWA");
+        info.setVersion(ver);
+        return;
+    }
 
     // uvicorn + {"detail":...} -> FastAPI
     if (info.name_len > 0 and std.mem.eql(u8, info.name(), "uvicorn")) {
@@ -1928,6 +2012,39 @@ fn fingerprintHttp(data: []const u8, info: *ServiceInfo) void {
             return;
         }
     }
+}
+
+fn findCookieName(headers: []const u8, name: []const u8) bool {
+    var pos: usize = 0;
+    while (pos < headers.len) {
+        const line_end = std.mem.indexOfPos(u8, headers, pos, "\r\n") orelse headers.len;
+        const line = headers[pos..line_end];
+        if (line.len > 12) {
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse line.len;
+            if (colon < line.len) {
+                const hdr = line[0..colon];
+                var is_cookie = hdr.len == 10;
+                if (is_cookie) {
+                    for (hdr, "set-cookie") |a, b| {
+                        const la = if (a >= 'A' and a <= 'Z') a + 32 else a;
+                        if (la != b) {
+                            is_cookie = false;
+                            break;
+                        }
+                    }
+                }
+                if (is_cookie) {
+                    const val_start = colon + 1;
+                    const val = std.mem.trimLeft(u8, line[val_start..], " ");
+                    if (val.len > name.len and std.mem.startsWith(u8, val, name) and val[name.len] == '=') {
+                        return true;
+                    }
+                }
+            }
+        }
+        pos = if (line_end + 2 <= headers.len) line_end + 2 else headers.len;
+    }
+    return false;
 }
 
 fn findJsonValue(data: []const u8, prefix: []const u8) ?[]const u8 {

@@ -193,7 +193,7 @@ brew tap effront/tap && brew install ohmz
 docker run --cap-add=NET_RAW ghcr.io/effront/ohmz -sS 192.168.1.0/24
 
 # Or download the .deb
-sudo dpkg -i ohmz_0.7.1_amd64.deb
+sudo dpkg -i ohmz_0.7.2_amd64.deb
 ```
 
 ### Prerequisites

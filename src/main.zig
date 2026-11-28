@@ -16,7 +16,7 @@ const os_mod = @import("os.zig");
 const traceroute_mod = @import("traceroute.zig");
 const scripts_mod = @import("scripts.zig");
 
-const VERSION = "0.7.1";
+const VERSION = "0.7.2";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -342,9 +342,14 @@ pub fn main() !void {
             for (open_ports, 0..) |r, i| {
                 var pbuf: [12]u8 = undefined;
                 const pstr = std.fmt.bufPrint(&pbuf, "{d}/tcp", .{r.port}) catch "?/tcp";
+                var svc_buf: [40]u8 = undefined;
                 const svc = if (has_versions) blk: {
                     const detected = banners.?[i].name();
-                    break :blk if (detected.len > 0) detected else serviceName(r.port);
+                    const base = if (detected.len > 0) detected else serviceName(r.port);
+                    if (banners.?[i].tls and !std.mem.startsWith(u8, base, "ssl/") and !std.mem.eql(u8, base, "https") and !std.mem.eql(u8, base, "imaps") and !std.mem.eql(u8, base, "smtps") and !std.mem.eql(u8, base, "ftps") and !std.mem.eql(u8, base, "ldaps") and !std.mem.eql(u8, base, "pop3s") and !std.mem.eql(u8, base, "telnets")) {
+                        break :blk std.fmt.bufPrint(&svc_buf, "ssl/{s}", .{base}) catch base;
+                    }
+                    break :blk base;
                 } else serviceName(r.port);
                 if (has_versions) {
                     const ver = banners.?[i].version();
@@ -393,9 +398,14 @@ pub fn main() !void {
                 const hstr = target_mod.formatIp(&hbuf, r.ip);
                 var pbuf: [12]u8 = undefined;
                 const pstr = std.fmt.bufPrint(&pbuf, "{d}/tcp", .{r.port}) catch "?/tcp";
+                var svc_buf2: [40]u8 = undefined;
                 const svc = if (has_versions) blk: {
                     const detected = banners.?[i].name();
-                    break :blk if (detected.len > 0) detected else serviceName(r.port);
+                    const base = if (detected.len > 0) detected else serviceName(r.port);
+                    if (banners.?[i].tls and !std.mem.startsWith(u8, base, "ssl/") and !std.mem.eql(u8, base, "https") and !std.mem.eql(u8, base, "imaps") and !std.mem.eql(u8, base, "smtps") and !std.mem.eql(u8, base, "ftps") and !std.mem.eql(u8, base, "ldaps") and !std.mem.eql(u8, base, "pop3s") and !std.mem.eql(u8, base, "telnets")) {
+                        break :blk std.fmt.bufPrint(&svc_buf2, "ssl/{s}", .{base}) catch base;
+                    }
+                    break :blk base;
                 } else serviceName(r.port);
                 if (has_versions) {
                     const ver = banners.?[i].version();
